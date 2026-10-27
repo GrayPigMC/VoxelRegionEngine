@@ -13,6 +13,9 @@ Volume sphere = Sphere.of(0.5, 64.5, -15.5, 200);
 Volume box = new BoxVolume(new IntBox(-32, -64, -32, 32, 128, 32));
 Volume cylinder = new Cylinder(Point3.of(0.5, 0, 0.5), 40, -64, 128);
 // cylinder 的 40 是放大两倍后的半径，即 20 格。
+Volume opening = Volumes.difference(sphere, box);
+Volume combined = Volumes.union(opening, cylinder);
+Volume intersection = Volumes.intersection(sphere, cylinder);
 ```
 
 `Volume` 的四个方法：
@@ -37,6 +40,10 @@ while (chunks.hasNext()) {
 ```
 
 游标按 32×32 Chunk 的 Region 分组，父范围完全包含时跳过子级几何重算；只保存常数个游标字段。它不是线程安全对象，也不保证每次 `hasNext()` 只做一次分类；调用者要将扫描计入预算。
+
+`checkpoint()` 返回规范化后的下一个候选位置。`ChunkCursor.restore(volume,minY,maxY,checkpoint)` 检查格式和边界后以常数大小状态恢复，不从第一个区块重扫。这个几何游标不是重放世界修改的授权；还要验证同镜像的操作回执。
+
+`SphereShell(center,innerExclusiveRadius2,outerRadius2,minY,maxY)` 选择内球之外、外球之内的体素；初始球用 `innerExclusiveRadius2=-1`。`RadialWavefront` 在收到当前层确认后才返回下一层，支持暂停和保存恢复。宿主不能因墙上时钟超时而跳过尚未完成的层。
 
 `SectionKey(x,y,z).bounds()` 给出该 16³ 区段的世界包围盒。
 
@@ -86,11 +93,17 @@ WHOLE_AIR 仅说明删除选择覆盖整个区段且无需留下流体，后端�
 
 ```java
 FrozenOcclusion occlusion = FrozenOcclusion.axis6(center, volume.bounds(), frozenBlockers, maxBlockers);
+FrozenOcclusion diagonal = FrozenOcclusion.axis26(center, volume.bounds(), frozenBlockers, maxBlockers);
+FrozenOcclusion refined = FrozenOcclusion.raycastRefined(center, volume.bounds(), frozenBlockers, maxBlockers);
 ```
 
-阻挡盒会被复制并构建 BVH。主轴取中心方向绝对值最大项，平局 X→Y→Z；阴影包含阻挡盒自身，横截面固定，延伸到爆炸包围盒。中心在阻挡盒内时保守地将整个范围遮蔽。
+`AXIS_26` 使用固定平局规则选择面、棱或角方向并挤出阻挡盒。`RAYCAST_REFINED` 对冻结盒的 BVH 做精确有理数视线相交，不模拟爆炸能量。`MacroVoxelMask` 支持 4、8、16 格宏体素；粗遮挡不改变最后的精确方块保护检查。
 
-盒数量超预算直接拒绝，不丢弃部分阻挡物继续爆炸。输入必须来自同一逻辑快照；边改世界边采集会使结果依赖顺序，主库无法替宿主修复这种错误。测试 mod 当前仅提供 NONE，不能将纯库 AXIS_6 的存在理解为世界快照适配已经完成。
+`FrozenOcclusion.mergeAdjacent` 仅在几何相接且传播语义保持等价时合并盒。AXIS 模式要求合并前后具有相同的带符号量化方向，不能单凭两个盒相邻就合并。
+
+阻挡盒会被复制并构建 BVH。`AXIS_6` 的主轴取中心方向绝对值最大项，平局 X→Y→Z；其阴影包含阻挡盒自身，横截面固定，延伸到爆炸包围盒。中心在参与遮挡的阻挡盒内时保守地将整个范围遮蔽。
+
+盒数量超预算直接拒绝，不丢弃部分阻挡物继续爆炸。输入必须来自同一逻辑快照；边改世界边采集会使结果依赖顺序，主库无法替宿主修复这种错误。Forge 适配器通过 `FrozenOcclusionCapture` 完整捕获并验证原始阻挡状态，以独立文件持久化后才构建索引和删除；不完整或变化的快照会暂停。
 
 ## 5. 调度与背压
 

@@ -1,22 +1,26 @@
-# Forge 1.20.1 validation adapter
+# Forge 1.20.1 adapter and validation mod
 
-This is a runnable validation baseline for VoxelRegionEngine, not a completed implementation of all Phase 1 requirements. It targets ordinary Forge 1.20.1, Forge 47.3.7 and Java 17. Hybrid/external server cores are unsupported. It does not modify GTLCore.
+This project builds the reusable Forge adapter and a small mod providing test commands and an adjustable charge. It targets Java 17, Minecraft 1.20.1 and ordinary Forge 47.3.7. Hybrid server cores are outside the contract. GTLCore is unchanged.
 
-The release jar contains the independent engine as a nested library. The engine is not a separate gameplay mod. Both this original adapter and the engine use MPL-2.0; their license is included. The optional verification sources and worlds are local test material and are not included in a normal build.
+Runtime code lives in `org.voxelregion.forge.runtime`; hosts call `org.voxelregion.forge.ForgeRegionEngine`. The separate adapter jar has no `@Mod`. The test mod embeds both the adapter and independent Java engine through JarJar. All three artifacts use MPL-2.0. Verification classes, test structures and verification dimensions are excluded from normal artifacts, including artifacts built after a verification compile.
 
 ## Build and run
 
 From this directory, with Java 17:
 
 ```powershell
-..\..\gradlew.bat --no-daemon --max-workers=1 build
+..\..\gradlew.bat --no-daemon --max-workers=1 adapterJar remapJar
 ..\..\gradlew.bat --no-daemon --max-workers=1 runClient
 ..\..\gradlew.bat --no-daemon --max-workers=1 -Pverification runGameTest
 ```
 
-Add `--offline` when the Minecraft/Forge/Loom dependencies are already cached. For bounded local testing set `JAVA_TOOL_OPTIONS=-XX:ActiveProcessorCount=1`; the supplied Gradle settings also cap workers at one. Put the normal `build/libs/voxel-region-forge-test-1.20.1-0.1.0.jar` in an ordinary Forge test installation. It must be present on both client and server because it adds an item. A build with `-Pverification` is for local tests only.
+Use `--offline` when dependencies are cached. Bound local JVM parallelism with `JAVA_TOOL_OPTIONS=-XX:ActiveProcessorCount=1`; Gradle workers are also capped. Normal outputs are `build/libs/voxel-region-forge-adapter-1.20.1-0.1.0.jar` and `build/libs/voxel-region-forge-test-1.20.1-0.1.0.jar`. The portable engine is built by the main project. `adapterDevelopmentJar` supplies a named development artifact; `adapterJar` is SRG-remapped for ordinary Forge.
 
-Commands require permission level 2, including using the item after it has been given to someone else:
+Put the test jar in a disposable Forge installation. It adds an item and belongs on both client and server; it already contains both libraries. Do not add duplicate copies of those libraries. The verification source set is for local GameTests; normal jars still filter its content. See [embedding instructions](../../docs/forge-embedding.md) to use the adapter without the test mod.
+
+## Commands
+
+Giving, using and controlling charges requires permission level 2:
 
 ```text
 /vre give 64 80
@@ -30,34 +34,63 @@ Commands require permission level 2, including using the item after it has been 
 /vre cancel <operation-UUID>
 ```
 
-`give` accepts `<radius> <fuseTicks> [generate=false] [clearFluids=true]`. `blast` accepts `<radius> [generate=false] [clearFluids=true]`. `generate` permits normal chunk loading/generation; `clearFluids=false` retains free fluids and leaves water behind when removing a destroyable waterlogged solid. Thus `false false` means loaded-only and preserve fluids. Existing shorter commands retain their original meaning.
+`give` accepts `<radius> <fuseTicks> [generate=false] [clearFluids=true]`; `blast` accepts `<radius> [generate=false] [clearFluids=true]`. Use the charge on a block to arm a stationary smoke marker in the adjacent cell. It is not a falling TNT entity. `blast` submits at the command position's block center with no fuse. The initial `FUSE visited=0` response is acceptance, not evidence of a stalled operation; inspect later status.
 
-Use the charge on a block: it arms a stationary smoke marker in the adjacent block cell and reports its operation UUID. It is a test item, not a falling TNT entity. `blast` immediately submits a sphere centered on the command position's block center. The fluid choice is stored in the item, immutable intent and task; older data without this field defaults to true. Status and the item tooltip display the choice.
+The commands submit spheres. Hosts can also submit persisted `RegionGeometry.Ball`, `Box`, `Column` and `Combined` expressions through `ForgeRegionEngine.submit`. The independent geometry codec supports schema-checked NBT and bounded union/intersection/difference expressions.
 
-Use separate disposable worlds for different generation and protection experiments. This engine intentionally performs permanent terrain changes; cancelling stops remaining work and does not restore earlier changes.
+## Runtime behavior
 
-## Implemented behavior
+New `CENTER_OUT` tasks first process the center chunk and a radius-one bootstrap region, then non-overlapping shells of the configured width. Default shell width is 32. Non-spherical shapes are intersected with these shells. `AS_FAST_AS_POSSIBLE` uses one volume phase with storage-oriented traversal. Phase progress is persisted; old tasks retain their old wave interpretation. This is shell ordering, not a strict distance sort of every voxel.
 
-- Exact block-center sphere geometry and library chunk/section classification. Air sections and outside sections are skipped; inside sections avoid repeated containment math.
-- One cooperative main-thread CPU/visit/write budget shared across operations and dimensions, round-robin execution, at most two retained/requested chunks globally. An individual native block callback or world-generation task cannot be preempted by this budget.
-- Loaded-only mode pauses at unloaded intersecting chunks. Explicit generation mode uses ordinary Forge chunk tickets and polls `getChunkNow` across ticks. It never overwrites chunk NBT, creates `EmptyLevelChunk`, fakes `Status=full`, or bypasses generation. Tickets are released after each chunk and on pause/cancel/shutdown.
-- Before every direct block mutation, optional FTB Chunks public API permissions are checked. Missing FTB permits normal worlds; installed FTB with an unavailable manager or incompatible API pauses work. The default respects `canExplosionsDamageTerrain`; the configuration can protect every claim. There is no claim bypass mode. Claims do not block propagation.
-- Protected tag `voxelregion_test:protected`, negative destroy speed and context-sensitive explosion resistance protect blocks. The default resistance threshold is 1200. Block entities belonging to protected blocks stay in place. Other mod protection systems require additional adapters; they are not silently advertised as supported.
-- Fluids are included in region clearing by default. With `clearFluids=true`, pure `LiquidBlock` states with nonempty fluid bypass hardness/resistance thresholds after the explicit protected-tag check; claim permissions still apply. This covers source and flowing water/lava. Destroying a waterlogged solid removes both the block and its water. With `clearFluids=false`, free liquids stay, and a destroyable waterlogged solid is replaced by its fluid state. Protected waterlogged solids retain both in either mode. Ordinary fluid ticks can later refill an opening from surviving outside sources; this is not a persistent fluid exclusion zone.
-- Native `ServerLevel.setBlock` maintains block entities, POI notifications, heightmaps, skylight-source data, light checks, dirty chunks and normal client updates. **No direct section replacement is enabled.** Native removal callbacks may drop container contents or run mod-specific effects; ordinary block loot generation is not explicitly invoked.
-- **Physics defaults to `NONE`** (`UPDATE_CLIENTS | UPDATE_KNOWN_SHAPE`, flags 2|16). This deliberately suppresses neighbor/shape propagation and is shown in status. Server config `physics="COMPATIBLE"` uses native flags 3 for a compatibility comparison. Native neighbor/fluid/falling-block effects can affect locations outside the direct sphere or claims; this adapter has no indirect-effect protection or `BOUNDARY_ONLY` implementation.
-- Entity damage defaults to zero. When explicitly enabled, each currently loaded entity in the initial broad-phase snapshot is considered once using its actual current distance from the continuous sphere center, linear attenuation and ordinary damage events. Every claimed chunk protects entities regardless of terrain explosion settings. This is separate from block permission. Unloaded entities, occlusion and physical knockback are not implemented.
+Default `generate=false` with propagation `NONE` excludes unloaded chunks and continues. Exclusions are remembered, so later loading does not cause the old operation to revisit them. Completion describes the selected loaded scope, not every chunk in the mathematical radius. With explicit generation permission, native storage/tickets/load-generation handle unavailable chunks. Tickets remain held through required completion and are released after work, control transitions and shutdown.
 
-Settings are in the world's `serverconfig/voxelregion_test-server.toml`. Defaults are 4 ms, 8192 visited voxel candidates and 1024 native block writes per server tick. The current scheduler cannot cap vanilla's separate lighting, saving, network or generation worker costs. Large-radius throughput and TPS improvements have not been established by these defaults.
+Before mutation, FTB Chunks permissions are checked when the mod is installed. Missing FTB permits an ordinary world; an installed but unavailable/incompatible provider pauses safely. Terrain follows the owning team's explosion setting unless configured to protect every claim. There is no claim bypass. Claims do not cast propagation shadows; entity permission is separate and conservatively protects every claimed chunk.
 
-## Persistence and completion limits
+Protected tags, negative or unknown/nonfinite hardness and contextual explosion resistance retain blocks. The default resistance threshold is 1200. Protected block entities remain intact. `clearFluids=true` clears free source/flowing water and lava after explicit tag/claim protection, and removes water with a destroyable waterlogged host. `false` retains free fluids and replaces a removed waterlogged host with its fluid state. Protected waterlogged solids retain both. Outside sources can flow into openings later.
 
-Before a task is accepted, an immutable, flushed intent is written under the world's `data/voxelregion_test_intents/<uuid>.nbt`. SavedData tracks status and progress per dimension. A Forge chunk capability stores `STARTED` and `COMPLETE` receipts in the same chunk serialization as terrain. Receipts are not replaced by a single latest UUID, so a later operation cannot erase an older operation's receipt. Capacity exhaustion fails closed instead of deleting evidence.
+Whole-section batches require complete geometry coverage, no shadow, static eligible palettes, current mutation revisions, world-border checks and audited host observers. They replace state containers, preserve biomes and reconcile heightmaps, sky sources, ticks, light work and aggregated notifications. Exact vanilla air variants and eligible vanilla water are supported; block entities, POI-sensitive/special states, lava and waterlogged solids use native writes. Unknown mods or unsupported states also fall back. **`HostIntegration.registerAuditedMod` is an integration assertion, not a switch that makes arbitrary mod callbacks safe.**
 
-`WRITTEN` means direct writes were submitted. It explicitly does **not** acknowledge completed lighting, client delivery or durable disk storage. There is no per-chunk durable-save acknowledgement or automatic crash recovery in this baseline. All unfinished tasks read from SavedData become `PAUSED_RECOVERY`; `/vre resume` refuses them. Inspect their immutable intent and chunk receipts, cancel them, and use a new explicitly requested operation if appropriate. An intent whose SavedData entry was never saved remains manual diagnostic evidence and is never automatically executed. Recovery does not replay old explosions against subsequent player construction.
+Physics defaults to `NONE` (native flags 2|16 on per-block writes). `BOUNDARY_ONLY` notifies retained adjacent states; `COMPATIBLE` uses native flags 3. Both enabled physics modes can produce indirect effects beyond the direct volume or permission boundary. Default DROP_NONE omits block loot and suppresses new synchronous item entities in the actual deletion cell, including native container contents. Native removal callbacks still execute. Existing entities, other cells/threads and later drops are unaffected; mod-specific delayed drops require host support.
 
-In-memory pauses retain the exact scan cursor and can resume. Completed, cancelled and failed operations cannot resume. No physical rollback is provided. Receipt and SavedData round-trip tests are not a substitute for power-loss, torn-write, live FTB or client synchronization testing.
+Entity damage defaults to zero. Enabled damage considers currently loaded entities once, uses continuous shape containment and linear attenuation from the task's execution center, and dispatches ordinary damage events. It has separate claim checks. Entity occlusion, knockback and automatic replay without entity receipts are not provided.
 
-## Native test coverage
+## Frozen propagation and generation
 
-The optional GameTests exercise direct spherical inclusion/exclusion, bedrock and gateway block-entity retention, ordinary chest block-entity removal, native heightmap updates, receipt NBT round trips, refusal to replay completed/cancelled operations, and conservative reload of unfinished tasks. Fluid cases check source/flowing water and lava, removable/protected waterlogged solids, outside preservation, and a lowered resistance threshold. The fluid fixtures isolate native flow so they measure direct removal, not later refill. Test execution and results must be recorded separately; compiling this module alone is not a live-world pass. The template is an independently generated empty Minecraft structure.
+The server `propagation` setting supports `NONE` (default), `AXIS_6`, `AXIS_26` and `RAYCAST_REFINED`. Non-NONE modes read the original whole region before deleting blocks. The independent `voxelregion_test:blocks_propagation` tag supplies blocker facts; it is not synonymous with `voxelregion_test:protected`. Macro-cell size must be 4, 8 or 16. Quantized directional shadows and refined frozen-box ray intersection do not simulate explosion energy.
+
+Capture watches chunk revisions and tag-policy changes, writes an immutable hash-checked blocker file, then compiles its index on one bounded worker without world access. Missing chunks, unknown mutation tracking, changes during capture or exceeded limits prevent unsafe execution. In particular, loaded-only propagation capture pauses when it cannot read the complete original region; it cannot apply the NONE mode's unloaded exclusion rule to pretend unknown space is transparent. Recovery reloads the frozen file rather than recapturing already-cleared terrain.
+
+Generation shortcuts are deliberately narrow: absent stored data, no existing/in-flight holder, a native fresh ProtoChunk, exact audited vanilla flat settings, full-height coverage, NONE propagation and current permissions/rules. The native NOISE stage retains protected layers and skips eligible generation writes; native status progression, lighting and FULL publication continue. Noise/custom generators or unknown world-generation integrations use ordinary generation. Bulk-observer registration does not supply world-generation proof. No fake FULL NBT, direct region-file writes or universal empty-chunk constructor is used.
+
+## Configuration and measurements
+
+Settings are in `world/serverconfig/voxelregion_test-server.toml` unless the embedding host chooses another name.
+
+| Default | Value |
+|---|---|
+| Shared cooperative CPU budget | 4 ms/tick |
+| Candidate visits / block writes | 262144 / 262144 per tick |
+| Chunk packet budget | 1048576 bytes/tick, multiplied by tracking recipients |
+| Pending metadata budget | 33554432 bytes |
+| Maximum radius / pending operations | 2000 / 16 |
+| Retained/requested operation chunks | Configurable up to eight globally; default eight, including pending completion |
+| Progression / shell width | CENTER_OUT / 32 blocks |
+| Physics / propagation / entity damage | NONE / NONE / 0 |
+
+A native callback, serialization call or generation task is not preemptible. These are cooperative limits, not a hard guarantee that every tick finishes in 4 ms. Lighting, storage and packet backlogs have separate completion paths. An indivisible oversized packet incurs bandwidth debt rather than starving forever.
+
+`ServerTickTimings` measures `MinecraftServer.tickServer` HEAD to RETURN, including Forge END work, and supplies the scheduler's adaptive timing. Vanilla `averageTickTime` and `forge tps` are sampled before END and omit adapter execution there. Report full-tick samples, CPU/RSS, stage timings and completion scope; do not label a nearby loaded-only R2000 fixture as a completed full-radius benchmark.
+
+## Persistence and completion
+
+Acceptance writes a flushed immutable intent under `data/voxelregion_test_intents/<uuid>.nbt`. Geometry, immutable policies, bootstrap/phase interpretation and frozen-field identity accompany persisted progress. `FrozenFieldStore` publishes `<uuid>.occlusion.nbt` without replacing existing evidence and validates schema, identity, size and SHA-256 on read.
+
+Chunk capabilities store operation identities, completed-phase watermarks, exact in-progress cursors, pending-write sentinels and mutation revisions in the same native NBT image as terrain. Receipt capacity exhaustion fails closed. SavedData is not sufficient proof to replay a write. Journal reconciliation enters recovery; completed phases are skipped, and remaining work continues only with matching original intent and valid same-image evidence. Missing receipts, legacy STARTED without a cursor, revision mismatch, uncertain pending writes or missing frozen snapshots pause safely. An unvisited chunk after restart is not implicitly trusted.
+
+`WRITTEN` waits for native light work, captured terrain/POI store futures, storage synchronization and required packet submission. It does not promise remote-client receipt/rendering. Save and packet queues recheck the chunk revision after light completion; a later edit requires a new light barrier. Failures are not erased by a later successful flush. Pause/cancel also settle already-submitted work; cancellation is durable and does not undo earlier writes. Ordinary resume cannot override `PAUSED_RECOVERY`.
+
+## Validation scope
+
+Verification sources cover geometry/fluid/protection fixtures, native block entities/heightmaps, palette/light differentials, generation proof invalidation, frozen capture and NBT, wave/control/recovery behavior, public facade calls, store failures and late-mutation fences. Added cases still require the unified GameTest run; listing or compiling them is not a pass statement. Final remapped artifacts additionally require standard dedicated-server loading, persistence and bounded large-radius measurements. Live FTB/modpack interactions, client behavior and interrupted-world cases must be assessed in their actual deployment context.
+
+The [0.1.0 validation record](../../docs/validation-0.1.0.md) identifies the tested artifacts, all 66 passing native GameTests, standard dedicated-server checks, persistence/restart results and bounded timing samples. It also records the untested deployment boundaries. Use disposable worlds; keep player reports, runtime worlds, raw logs and local incident evidence out of commits/uploads.

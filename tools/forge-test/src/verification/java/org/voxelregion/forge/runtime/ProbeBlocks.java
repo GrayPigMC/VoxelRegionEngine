@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MPL-2.0 */
-package org.voxelregion.testmod;
+package org.voxelregion.forge.runtime;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceLocation;
@@ -16,11 +16,13 @@ import net.minecraftforge.registries.ForgeRegistries;
 import net.minecraftforge.registries.RegisterEvent;
 
 /** Deliberately stateful/unknown mod callbacks, present only in local verification runs. */
-@Mod.EventBusSubscriber(modid = VoxelRegionTestMod.ID, bus = Mod.EventBusSubscriber.Bus.MOD)
+@Mod.EventBusSubscriber(modid = RuntimeBridge.PERSISTENCE_NAMESPACE, bus = Mod.EventBusSubscriber.Bus.MOD)
 public final class ProbeBlocks {
-    static final ResourceLocation SWITCHING = new ResourceLocation(VoxelRegionTestMod.ID, "verification_switching");
-    static final ResourceLocation UNKNOWN = new ResourceLocation(VoxelRegionTestMod.ID, "verification_unknown_resistance");
-    static final ResourceLocation PROTECTED_WATERLOGGED = new ResourceLocation(VoxelRegionTestMod.ID, "verification_protected_waterlogged");
+    static final ResourceLocation SWITCHING = new ResourceLocation(RuntimeBridge.PERSISTENCE_NAMESPACE, "verification_switching");
+    static final ResourceLocation UNKNOWN = new ResourceLocation(RuntimeBridge.PERSISTENCE_NAMESPACE, "verification_unknown_resistance");
+    static final ResourceLocation PROTECTED_WATERLOGGED = new ResourceLocation(RuntimeBridge.PERSISTENCE_NAMESPACE, "verification_protected_waterlogged");
+    static final ResourceLocation REMOVAL_PROBE = new ResourceLocation(RuntimeBridge.PERSISTENCE_NAMESPACE, "verification_removal_probe");
+    static java.util.function.BiConsumer<Level, BlockPos> removalAction = (level, position) -> {};
 
     @SubscribeEvent
     public static void register(RegisterEvent event) {
@@ -39,6 +41,12 @@ public final class ProbeBlocks {
                 }
             });
             helper.register(PROTECTED_WATERLOGGED, new SlabBlock(Block.Properties.of().strength(-1, 3_600_000)));
+            helper.register(REMOVAL_PROBE, new Block(Block.Properties.of().strength(1, 1)) {
+                @Override public void onRemove(BlockState old, Level level, BlockPos position, BlockState replacement, boolean moving) {
+                    super.onRemove(old, level, position, replacement, moving);
+                    if (old.getBlock() != replacement.getBlock()) removalAction.accept(level, position);
+                }
+            });
         });
     }
     private ProbeBlocks() {}

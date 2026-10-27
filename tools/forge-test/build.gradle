@@ -9,7 +9,11 @@ java {
     sourceCompatibility = targetCompatibility = JavaVersion.VERSION_17
 }
 repositories { mavenCentral() }
-loom { silentMojangMappingsLicense() }
+loom {
+    silentMojangMappingsLicense()
+    mixin.defaultRefmapName = 'voxelregion-forge.refmap.json'
+    forge { mixinConfig 'voxelregion-forge.mixins.json'; mixinConfig 'voxelregion-receipts.mixins.json' }
+}
 if (project.hasProperty('verification')) {
     sourceSets.main.java.srcDir 'src/verification/java'
     sourceSets.main.resources.srcDir 'src/verification/resources'
@@ -40,13 +44,65 @@ tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
     options.release = 17
 }
+tasks.withType(AbstractArchiveTask).configureEach {
+    preserveFileTimestamps = false
+    reproducibleFileOrder = true
+}
 processResources {
     inputs.property 'version', project.version
     filesMatching('META-INF/mods.toml') { expand version: project.version }
 }
 jar {
+    manifest.attributes('MixinConfigs': 'voxelregion-forge.mixins.json,voxelregion-receipts.mixins.json')
     from('../../LICENSE') { rename { 'LICENSE-voxel-region-engine' } }
     // ProcessResources can retain files from an earlier verification invocation.
-    exclude 'org/voxelregion/testmod/RegionGameTests*', 'org/voxelregion/testmod/ProbeBlocks*'
+    // The delivery mod contains registration/items/commands only. The adapter is
+    // remapped separately below and embedded as a normal Forge JarJar library.
+    exclude 'org/voxelregion/forge/**'
+    exclude { detail -> detail.path.endsWith('.class') &&
+            !detail.path.startsWith('org/voxelregion/testmod/VoxelRegionTestMod') &&
+            !detail.path.startsWith('org/voxelregion/testmod/RegionChargeItem') }
+    exclude 'voxelregion-forge.mixins.json', 'voxelregion-receipts.mixins.json', 'voxelregion-forge.refmap.json'
+    exclude '**/*GameTests*', '**/ProbeBlocks*'
     exclude 'data/voxelregion_test/structures/empty.nbt'
+    exclude 'data/voxelregion_test/dimension/generation_*.json'
 }
+
+def adapterDevelopmentJar = tasks.register('adapterDevelopmentJar', Jar) {
+    dependsOn tasks.named('classes')
+    archiveBaseName = 'voxel-region-forge-adapter-1.20.1'
+    archiveClassifier = 'dev'
+    from(sourceSets.main.output) {
+        include 'org/voxelregion/forge/**'
+        include 'voxelregion-forge.mixins.json', 'voxelregion-receipts.mixins.json', 'voxelregion-forge.refmap.json'
+        exclude '**/*GameTests*', '**/ProbeBlocks*'
+    }
+    from('../../LICENSE') { rename { 'LICENSE-voxel-region-engine' } }
+    manifest.attributes('FMLModType': 'GAMELIBRARY',
+            'Automatic-Module-Name': 'org.voxelregion.forge',
+            'MixinConfigs': 'voxelregion-forge.mixins.json,voxelregion-receipts.mixins.json')
+}
+
+// One compilation keeps package-private verification in the development launch;
+// these two filtered/remapped artifacts have disjoint production packages.
+def remappedAdapter = tasks.register('adapterJar', net.fabricmc.loom.task.RemapJarTask) {
+    dependsOn adapterDevelopmentJar
+    inputFile = adapterDevelopmentJar.flatMap { it.archiveFile }
+    archiveBaseName = 'voxel-region-forge-adapter-1.20.1'
+    archiveClassifier = ''
+    sourceNamespace = 'named'
+    targetNamespace = 'srg'
+    addNestedDependencies = false
+}
+
+tasks.named('remapJar', net.fabricmc.loom.task.RemapJarTask) {
+    dependsOn remappedAdapter
+    forgeNestedJars.add(remappedAdapter.flatMap { it.archiveFile }.map { file ->
+        new net.fabricmc.loom.build.nesting.IncludedJarFactory.NestedFile(
+                new net.fabricmc.loom.build.nesting.IncludedJarFactory.Metadata(
+                        project.group.toString(), 'voxel-region-forge-adapter-1.20.1', project.version.toString(), null),
+                file.asFile)
+    })
+    nestedJars.from(remappedAdapter.flatMap { it.archiveFile })
+}
+tasks.named('assemble') { dependsOn remappedAdapter }

@@ -1,60 +1,72 @@
 # Forge 1.20.1 adapter integration
 
-The independent engine exposes no Minecraft, Forge or FTB types. `tools/forge-test` is the current executable reference adapter. It is a native block-write baseline for ordinary Forge 1.20.1, not the high-throughput section backend or a complete Phase 1 implementation. Hybrid server cores are outside the supported contract. GTLCore has not been modified by this work.
+The portable engine has no Minecraft, Forge or FTB types. The reusable Forge adapter is published separately from the test mod and includes its public facade, runtime and native mixin bridges. It targets ordinary Forge 1.20.1 / 47.3.7 and Java 17. Hybrid server cores are outside the contract; GTLCore has not been modified.
 
-## Host ownership
+See [embedding and public API](forge-embedding.md) for installation, [execution/performance contracts](high-performance.md) for the batch pipeline, and the [0.1.0 validation record](validation-0.1.0.md) for the tested artifact and deployment scope. This document describes implemented behavior and integration obligations.
 
-A future GTLCore integration should own one scheduler across all dimensions, operation authorization, Minecraft-thread commit access and lifecycle event registration. Do not start independent budgets for each machine or explosion. A machine can translate its center and radius into `Sphere.of(cx,cy,cz,radius)` and submit an operation to the host adapter. Reuse the standalone core and keep FTB/Minecraft linkage in the adapter. Preserve GTLCore's own version; adding this library does not authorize a host version change.
+## Host ownership and geometry
 
-`Sphere.of` accepts finite **half-grid** centers and radii: every supplied value must be an exact multiple of 0.5 within the library's validated coordinate bounds. Arbitrary continuous positions are rejected rather than silently rounded. The test commands deliberately align the center to `(blockX+0.5, blockY+0.5, blockZ+0.5)` and use integer radii. A future host must explicitly decide and document how it quantizes other source positions.
+Install `ForgeRegionEngine` once from the host mod constructor. The adapter then owns one scheduler and lifecycle across all dimensions. The host authenticates requests and invokes submission/control on the server thread; it must not create independent budgets per machine or explosion. Keep Minecraft linkage in the adapter and reuse the independent engine.
 
-The current GTLCore reference workspace has `FissionReactorMachine.doExplosion(BlockPos,float)` calling `Level.explode`. A future replacement is an explicit integration decision: the new region operation has different attenuation, timing, drops, neighbor physics and entity-damage semantics. It must not be substituted merely by passing the old explosion power as the new radius.
+`submitSphere` accepts a block position and integer radius, placing the center at that block's center. `submit` accepts immutable, NBT-serializable `RegionGeometry`: Ball, Box, Column, or a bounded Combined expression using union/intersection/difference. Core geometry retains its exact half-grid convention and block-center sampling. An arbitrary custom `Volume` is not automatically a supported persistent Forge request.
 
-## Version-checked Minecraft paths
+For generic geometry, execution uses the bounding box's derived block-center and an enclosing integer radius for wave ordering and attenuation; the supplied exact volume still determines block membership. The enclosing radius is checked against the server maximum. New center-out tasks have a radius-one bootstrap and explicitly select the center chunk first, then complete non-overlapping shells. The phase geometry is intersected with a non-spherical request. The fast progression option uses one phase with storage-oriented traversal. NBT preserves geometry, cursor, policy, shell width and bootstrap interpretation; old tasks are not reinterpreted using new defaults.
 
-These signatures were checked against the local Forge 47.3.7 mapped binary. The accompanying complete local Mojang-mapped Forge 47.3.0 source was used to inspect lifecycle behavior; runtime tests must still cover the actual deployed Forge/mod set.
+A future GTLCore caller replacing a vanilla `Level.explode` must select its region geometry and policy explicitly. Region radius is not vanilla explosion power; timing, drops, neighbor physics, propagation and entity effects differ. Adding this dependency does not authorize changing the host version.
 
-| Concern | Target API and constraints |
+## Native paths and their constraints
+
+The target signatures were checked against the local Forge 47.3.7 mapped binary; complete local Forge 47.3.0 sources also informed lifecycle inspection. Actual deployed mods still need integration validation.
+
+| Concern | Adapter contract |
 |---|---|
-| Loaded state without generation | `ServerChunkCache.getChunkNow(x,z)` on the server thread; null means not available, not proof of never-generated terrain. |
-| Normal generation/load | `addRegionTicket` with a distinct operation identity, then poll `getChunkNow` on later ticks; pair every ticket with `removeRegionTicket`. |
-| Avoid deceptive asynchronous APIs | `getChunkFuture(...)` calls `managedBlock` when invoked on the main thread in this target version. A returned future does not make the call a bounded nonblocking request. |
-| Existing stored data inspection | `chunkMap.read(ChunkPos)` uses the existing I/O worker and includes queued writes; an absent NBT does not prove absence of concurrent generation or structures. Never write `.mca` directly. |
-| Compatible mutation | `ServerLevel.setBlock`; `LevelChunk.setBlockState` alone omits the `Level.markAndNotifyBlock` path, including POI/neighbor/client notifications. |
-| Palette checks | `LevelChunkSection.hasOnlyAir`, `maybeHas`, `getStates`; static palette tests cannot prove unknown contextual mod callbacks safe. |
-| Heightmaps | `LevelChunk.setBlockState` updates all four FULL heightmaps. `Heightmap.primeHeightmaps` does not reset an already populated empty column; a future rebuild must initialize new zeroed maps before priming. |
-| Skylight sources | `chunk.initializeLightSources()` rebuilds source-column metadata; this alone does not finish relighting. |
-| Lighting | Normal writes enqueue `checkBlock` and section-state changes. `ThreadedLevelLightEngine.lightChunk` participates in generation/light tickets and is not a proven general relight replacement. Do not set `isLightCorrect=true` manually. |
-| Client updates | `ServerChunkCache.blockChanged` aggregates changes through `ChunkHolder`; normal world writes request this. Explicit whole-chunk packets require correct tracking and light completion first. |
-| Tick cleanup | `LevelTicks.clearArea(BoundingBox)` exists, but clearing an entire section also cancels ticks of retained protected voxels. A masked backend needs selective reconciliation. The current baseline follows native block replacement behavior. |
-| Receipts | Forge chunk capabilities serialize through `ForgeCaps` in the same `ChunkSerializer` result. There is no general `LevelChunk.getPersistentData()` method in this target API. |
-| Save acknowledgement | `ChunkDataEvent.Save` precedes the asynchronous chunk write and is not disk completion. `chunkMap.flushWorker()` is blocking and does not replace per-operation durable acknowledgements. |
+| Loaded state | Server-thread `getChunkNow(x,z)`; null means unavailable, not proof of never-generated terrain. |
+| Loading/generation | Distinct operation tickets, later polling, and paired release. Main-thread `getChunkFuture` can call `managedBlock`, so a future return type alone is not a nonblocking guarantee. |
+| Existing data | Native storage/IOWorker reads include queued writes. Absent NBT alone does not prove no existing/in-flight generation. No direct `.mca` writes. |
+| Exact mutation | `ServerLevel.setBlock` maintains native block-entity, POI, height, light and notification paths. `LevelChunk.setBlockState` alone is insufficient as a replacement. |
+| Palette batches | Full geometry coverage, unshadowed cells, trusted static states, host support, world border and current revisions are checked before replacing state containers. Biomes remain. |
+| Height and sky metadata | Batch maintenance rebuilds zero-initialized FULL heightmaps and skylight-source columns; calling `primeHeightmaps` on populated maps is not a reset. |
+| Tick cleanup | Whole-deleted sections can clear their ticks. Partial masks retain native replacement behavior; protected voxels must not lose scheduled ticks through a blanket clear. |
+| Lighting | Native mailbox tasks consume updates; mixed-air and water batches also reconcile sky-source/shadow interfaces. No manufactured `isLightCorrect` flag and no generation-owned LIGHT ticket release. |
+| Packets | Whole-chunk packets follow light and revision validation, use actual tracking recipients, and charge serialized bytes per recipient. Submission is not client acknowledgement. |
+| Receipts | Capability data is stored under `ForgeCaps` in the same ChunkSerializer image as terrain. SavedData is not a substitute for that evidence. |
+| Save acknowledgement | Captured terrain/POI store futures plus native worker synchronization are awaited. `ChunkDataEvent.Save` precedes async I/O and cannot itself prove durability. |
+| Full tick timing | `ServerTickTimings` wraps `tickServer` HEAD/RETURN. Vanilla `averageTickTime` and `forge tps` omit the Forge END work that contains region execution. |
 
-`new LevelChunkSection(airStates, oldSection.getBiomes())` can preserve biomes and correct derived counts, but replacing an array element skips native block removal callbacks, block entities, POI, skylight-source maintenance, lighting queues, heightmaps, ticking containers, notifications and host mixins. Consequently the current adapter never enables this optimization. A later fast path needs explicit trusted-state eligibility, correct side-effect reconciliation and native regression evidence before advertising a benefit.
+Batch write support is conditional. `HostIntegration` must account for all loaded mods' relevant storage mutation paths and aggregated observers. Unknown mods cause native fallback. Registering an empty observer without auditing its callbacks is not a safety proof. GTLCore's BlockStateWatcher and mesh-revision hooks are examples of observers that a future direct-section integration must explicitly notify or invalidate; the native fallback remains available.
 
-GTLCore also injects `LevelChunk.setBlockState` to notify `BlockStateWatcher`, and its bloom mesh revision tracking injects `LevelChunkSection.setBlockState/read`. Direct container/section replacement bypasses those hooks. A future host bulk-write adapter must either keep the native path or integrate equivalent host notifications and mesh invalidation.
+## Protection, fluids and physical effects
 
-## Optional FTB Chunks integration
+Optional FTB Chunks linkage uses the published 2001.3.1 API: `FTBChunksAPI.api().isManagerLoaded()`, the claimed-chunk manager and the owning team's `canExplosionsDamageTerrain()`. Reflection is isolated until `ftbchunks` is present. Installed-but-unavailable or incompatible protection pauses safely. Claims are rechecked before commits, and denial does not become a propagation blocker. Administrator status is not inherited as a bypass.
 
-The local host dependency `curse.maven:ftb-chunks-forge-314906:5378090` contains FTB Chunks **2001.3.1**. Its published API provides:
+`voxelregion_test:protected`, unbreakable/unknown hardness and context-sensitive resistance protect blocks. The fluid policy is persisted independently. `clearFluids=true` includes free source/flowing liquids after explicit tag and claim checks; waterlogged solids obey their host protection. With `false`, free liquids remain and allowed host removal writes `state.getFluidState().createLegacyBlock()`. Protected hosts keep both. Neither choice prevents later refill from outside sources.
 
-```java
-FTBChunksAPI.api().isManagerLoaded();
-ClaimedChunk claim = FTBChunksAPI.api().getManager().getChunk(
-    new ChunkDimPos(level.dimension(), chunkX, chunkZ));
-boolean mayDestroy = claim == null || claim.getTeamData().canExplosionsDamageTerrain();
-```
+Physics defaults to `NONE` (2|16). `BOUNDARY_ONLY` notifies retained neighbors; `COMPATIBLE` uses flags 3. Indirect fluids, falling blocks and callbacks can extend beyond the direct selection or claim boundary. Ordinary block loot is not generated. A synchronous deletion scope suppresses new item entities inside the replaced cell, including native container contents, while still running native removal callbacks. Existing items, other cells, other threads and later ordinary drops are untouched; mod-specific deferred drops require host integration.
 
-`ChunkDimPos` comes from FTB Library. The terrain helper reads the owning team's explosion property. The validation adapter resolves these published methods reflectively only when `ftbchunks` is loaded, avoiding a mandatory FTB dependency. It pauses when an installed provider cannot answer. A production typed adapter may instead use optional compile-only dependencies and isolate its class loading.
+Entity damage is independent and defaults to zero. Enabled processing considers loaded entities once, checks continuous geometry membership and separate claim permission, then uses linear attenuation from the execution center and native damage events. Every claim protects entities. This does not add entity occlusion or knockback; uncertain entity replay after restart is refused.
 
-Re-query permissions immediately before committing mutations. Treat a claim denial independently of propagation. Do not inherit an administrator's FTB bypass flag automatically. Entity permission is separate; the test adapter conservatively protects all claimed entities. The live FTB matrix, dynamic claim changes and unsupported provider behavior require actual integration tests before release.
+## Frozen propagation and generation
 
-## Current execution contract
+Server policy selects `NONE`, `AXIS_6`, `AXIS_26` or `RAYCAST_REFINED`. Non-NONE modes use the separate `voxelregion_test:blocks_propagation` tag, macro-cell sizes 4/8/16, and a complete pre-mutation capture. A tag can protect a block without blocking propagation, or block propagation independently of deletion permission. These modes define geometric shadows, not an energy simulation.
 
-The test adapter performs Sphere/NONE operations; library support for other shapes or propagation does not imply those modes are wired into Minecraft. It offers loaded-only pause or explicitly authorized normal generation, a shared cooperative write budget, native per-block maintenance, optional distance-based entity damage (default off), explicit physics `NONE`/`COMPATIBLE`, immutable intents, SavedData diagnostics and co-serialized chunk receipts.
+Capture runs on the world thread in bounded steps. A mutation subscription and rule revision protect the entire capture interval. A sealed snapshot contains detached boxes and revision evidence, is written as immutable checked NBT, and is compiled on a bounded single worker without world access. The original frozen file and its hash are reused after restart; already-cleared terrain is never used to reconstruct the original shadow.
 
-Direct clearing includes fluids by default (`clearFluids=true`). After checking the explicit protected tag, pure `LiquidBlock` states with nonempty fluid do not use the solid-block hardness/resistance filter. Claim checks still gate the actual write. Waterlogged solids use their host block's protection decision; an allowed deletion writes AIR. With `clearFluids=false`, free liquids are retained and an allowed waterlogged-solid deletion writes `state.getFluidState().createLegacyBlock()`. Protected solids retain both the block and its water. Persist the immutable choice with each operation and default missing legacy fields to true. Neither mode stops surviving sources outside the operation from flowing into the cleared region later.
+Overlapping operations in the same dimension execute in acceptance order when either enables propagation. The later operation cannot start capture until the earlier operation is terminal and all of its native acknowledgements have drained. A paused predecessor retains this ordering. Each snapshot describes the stable world when that operation becomes eligible; separate explosions do not pretend to share one simultaneous snapshot. NONE/NONE work can still advance concurrently under chunk reservations.
 
-`NONE` physics is the test default and means flags 2|16, not `BOUNDARY_ONLY`. `COMPATIBLE` uses flags 3 and allows ordinary indirect effects, which can escape the direct geometry/protection filter. Native callbacks can emit inventory contents. The adapter does not claim to suppress every mod effect, control every save/light/network backlog, finish durable persistence, perform restart replay, or construct legal empty chunks without generation. Status `WRITTEN` acknowledges submitted terrain changes only. Unfinished restart work becomes `PAUSED_RECOVERY` and cannot resume against potentially newer construction.
+Default NONE/loaded-only execution excludes unavailable chunks and continues. Non-NONE capture instead requires the original entire region to be readable: unknown space, changing facts, unsupported tracking or exhausted limits cannot be treated as transparent. Those conditions wait for bounded resources or pause safely, depending on the failure. Explicit generation permission permits normal terrain loading before capture; it does not authorize a shortcut that erases blockers before they are observed.
 
-Keep API design and integration documentation in this library repository. Keep test worlds, logs, player evidence and local incident archives out of uploads and commits.
+The generation fast path supports only proven vanilla flat profiles: native storage absence, no existing/in-flight holder, a fresh native ProtoChunk, full-height coverage, static rules, NONE propagation, no features/structures and a strictly verified generator/mod set. NOISE processing retains protected configured layers while omitting eligible layer writes. Retained terrain is capped at 4096 writes and at least one nonair layer must be skipped; otherwise ordinary generation is preferable. Permissions, rules and border are checked again before applying the shortcut; native generation/light/FULL progression remains in place. UNKNOWN or changed evidence uses normal generation. Auditing a bulk observer does not certify worldgen/retrogen behavior.
+
+## Completion and recovery
+
+The flushed immutable intent precedes acceptance. Durable checkpoints and SavedData preserve controls and phase progress; chunk receipts record operation identity, completed-phase watermarks, exact remaining cursor, pending-write sentinel and mutation revision in the terrain image. Recovery reconciles journals, skips already-completed phases and validates the remaining evidence before replay. A missing receipt, legacy STARTED without a cursor, changed revision, uncertain pending write or unavailable original frozen file pauses the old operation. A later loaded chunk is not implicitly authorized for a restarted task.
+
+`SETTLING` waits for submitted work. `WRITTEN` follows required native lighting, captured storage writes/synchronization and packet submission. Batch light failures remain part of the combined acknowledgement. Save/packet queues validate the current chunk identity and mutation revision after their light future; intervening edits trigger a new barrier, and reentrant serialization changes cannot be acknowledged as a stable image. Stop fails pending acknowledgements rather than marking them complete.
+
+Pause/cancel also settle already-submitted work. Durable cancellation takes precedence over older SavedData, completed phase receipts prevent replay against new construction, and ordinary resume cannot override uncertain recovery. Cancellation retains prior writes and is not rollback. These guarantees depend on audited mutation tracking; they do not claim a global atomic snapshot across all chunks, entities and remote clients.
+
+## Verification and deployment
+
+The repository contains native GameTests for the implemented paths and a separate local production probe. Final acceptance must use the actual remapped artifacts, not only a Loom development launch. Record seed, budgets, loaded/generated scope, CPU/heap, full-tick timing, light/storage tail and task outcome. A nearby fixture pass in loaded-only R2000 proves neither full-radius completion nor arbitrary mod compatibility. Newly added epoch, geometry and propagation cases require their own completed unified run before being described as passing.
+
+Keep API design, integration documentation and test sources here. Keep local worlds, player evidence, raw logs and incident archives out of commits and uploads.

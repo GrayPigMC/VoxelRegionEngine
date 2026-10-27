@@ -35,6 +35,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--core', required=True, type=Path)
     parser.add_argument('--forge', required=True, type=Path)
+    parser.add_argument('--adapter', type=Path)
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
     with ZipFile(args.core) as archive:
@@ -43,20 +44,46 @@ def main():
     with ZipFile(args.forge) as archive:
         names = archive.namelist()
         require('org/voxelregion/testmod/RegionChargeItem.class' in names, 'Missing adjustable charge')
-        require(not any('RegionGameTests' in n or 'ProbeBlocks' in n or n.endswith('/empty.nbt') for n in names),
-                'Verification-only content leaked into distributable mod')
         require(not any('/geometry/' in n for n in names), 'Engine duplicated outside nested jar')
         metadata = json.loads(archive.read('META-INF/jarjar/metadata.json'))
         libraries = [entry for entry in metadata['jars'] if entry['identifier']['group'] == 'org.voxelregion']
-        require(len(libraries) == 1, 'Expected exactly one nested engine')
-        with ZipFile(io.BytesIO(archive.read(libraries[0]['path']))) as nested:
-            engine(nested)
-            nested_classes = {name: nested.read(name) for name in nested.namelist() if name.endswith('.class')}
-            require(nested_classes == core_classes, 'Nested engine differs from the verified standalone library')
-        require(not any('.local/' in n or '/logs/' in n or '/world/' in n for n in names), 'Local evidence leaked')
+        require(len(libraries) == 2, 'Expected independent nested engine and Forge adapter')
+        found_engine = found_adapter = 0
+        classes = set()
+        archives = [(args.forge.name, archive)]
+        for entry in libraries:
+            archives.append((entry['path'], ZipFile(io.BytesIO(archive.read(entry['path'])))))
+        for label, part in archives:
+            part_names = part.namelist()
+            require(not any('GameTests' in n or 'ProbeBlocks' in n or n.endswith('/empty.nbt')
+                            or '/dimension/generation_' in n for n in part_names),
+                    'Verification-only content leaked: ' + label)
+            require(not any('.local/' in n or '/logs/' in n or '/world/' in n for n in part_names), 'Local evidence leaked: ' + label)
+            this_classes = {n for n in part_names if n.endswith('.class')}
+            require(not (classes & this_classes), 'Duplicate classes across Forge modules: ' + label)
+            classes.update(this_classes)
+            if 'org/voxelregion/geometry/Volume.class' in part_names:
+                found_engine += 1
+                engine(part)
+                require({n: part.read(n) for n in this_classes} == core_classes,
+                        'Nested engine differs from standalone library')
+            if 'org/voxelregion/forge/ForgeRegionEngine.class' in part_names:
+                found_adapter += 1
+                require('META-INF/mods.toml' not in part_names, 'Adapter must be a library, not another gameplay mod')
+                require('FMLModType: GAMELIBRARY' in part.read('META-INF/MANIFEST.MF').decode('utf8'), 'Adapter discovery metadata missing')
+                for config in ('voxelregion-forge.mixins.json', 'voxelregion-receipts.mixins.json'):
+                    spec = json.loads(part.read(config))
+                    require('.mixin' in spec['package'], 'Mixin package also owns ordinary runtime classes')
+                    require(spec['refmap'] in part_names, 'Missing production refmap: ' + config)
+                if args.adapter:
+                    with ZipFile(args.adapter) as standalone:
+                        require({n: part.read(n) for n in this_classes} ==
+                                {n: standalone.read(n) for n in standalone.namelist() if n.endswith('.class')},
+                                'Nested adapter differs from standalone remapped adapter')
+        require(found_engine == found_adapter == 1, 'Missing or duplicated nested library')
     result = {'result': 'PASS', 'core': str(args.core.resolve()), 'forge': str(args.forge.resolve()),
               'sha256': {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in (args.core, args.forge)},
-              'nested_engine': libraries}
+              'nested_libraries': libraries}
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(result, indent=2) + '\n', encoding='utf8')

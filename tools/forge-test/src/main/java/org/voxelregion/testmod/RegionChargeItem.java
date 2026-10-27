@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: MPL-2.0 */
 package org.voxelregion.testmod;
 
+import org.voxelregion.forge.ForgeRegionEngine;
+
 import java.io.IOException;
 import java.util.List;
 import net.minecraft.core.BlockPos;
@@ -15,7 +17,7 @@ import net.minecraft.world.item.TooltipFlag;
 import net.minecraft.world.item.context.UseOnContext;
 import net.minecraft.world.level.Level;
 
-final class RegionChargeItem extends Item {
+public final class RegionChargeItem extends Item {
     RegionChargeItem() { super(new Item.Properties().stacksTo(1)); }
 
     @Override
@@ -31,10 +33,10 @@ final class RegionChargeItem extends Item {
         ServerLevel level = (ServerLevel) context.getLevel();
         BlockPos center = context.getClickedPos().relative(context.getClickedFace());
         try {
-            var task = ForgeOperationRunner.submit(level, player.getUUID(), center, tag.getInt("Radius"), tag.getInt("Fuse"),
-                    tag.getBoolean("Generate"), clearsFluids(context.getItemInHand()));
+            var handle = ForgeRegionEngine.submitSphere(level, player.getUUID(), center, tag.getInt("Radius"),
+                    new ForgeRegionEngine.Options(tag.getInt("Fuse"), tag.getBoolean("Generate"), clearsFluids(context.getItemInHand())));
             level.playSound(null, center, SoundEvents.TNT_PRIMED, SoundSource.BLOCKS, 1.0F, 1.0F);
-            player.displayClientMessage(ForgeOperationRunner.status(task), false);
+            player.displayClientMessage(ForgeRegionEngine.status(level, handle.id()).orElseThrow().asComponent(), false);
             if (!player.getAbilities().instabuild) context.getItemInHand().shrink(1);
             return InteractionResult.CONSUME;
         } catch (IOException | RuntimeException ex) {
@@ -51,7 +53,7 @@ final class RegionChargeItem extends Item {
         tooltip.add(Component.literal("Requires permission level 2. Stationary charge; server selects neighbor physics."));
     }
 
-    static boolean clearsFluids(ItemStack stack) {
+    public static boolean clearsFluids(ItemStack stack) {
         var tag = stack.getTag();
         return tag == null || !tag.contains("ClearFluids") || tag.getBoolean("ClearFluids");
     }

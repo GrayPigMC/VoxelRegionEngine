@@ -1,7 +1,9 @@
 /* SPDX-License-Identifier: MPL-2.0 */
-package org.voxelregion.testmod;
+package org.voxelregion.forge.runtime;
 
 import java.io.IOException;
+import org.voxelregion.testmod.VoxelRegionTestMod;
+import org.voxelregion.testmod.RegionChargeItem;
 import java.util.UUID;
 import java.util.List;
 import java.util.LinkedHashMap;
@@ -27,7 +29,7 @@ import net.minecraftforge.gametest.GameTestHolder;
 import net.minecraftforge.gametest.PrefixGameTestTemplate;
 import net.minecraftforge.registries.ForgeRegistries;
 
-@GameTestHolder(VoxelRegionTestMod.ID)
+@GameTestHolder(RuntimeBridge.PERSISTENCE_NAMESPACE)
 @PrefixGameTestTemplate(false)
 public final class RegionGameTests {
     @GameTest(template = "empty", batch = "vre_fluids_default", timeoutTicks = 400)
@@ -134,7 +136,7 @@ public final class RegionGameTests {
                     "Outside flowing lava retained");
             helper.assertTrue(level.getBlockState(outsideWaterlogged) == wetSlab && !level.getFluidState(outsideWaterlogged).isEmpty(),
                     "Outside waterlogged solid retained");
-            VoxelRegionTestMod.LOGGER.info("Fluid region validation: clearFluids={}, inside cells match selected policy; protected waterlogged host and 3 outside cells retained; resistance threshold={}",
+            RuntimeBridge.LOGGER.info("Fluid region validation: clearFluids={}, inside cells match selected policy; protected waterlogged host and 3 outside cells retained; resistance threshold={}",
                     task.clearFluids, task.resistance);
         }).thenSucceed();
     }
@@ -167,7 +169,7 @@ public final class RegionGameTests {
     public static void sphereProtectionAndNativeCleanup(GameTestHelper helper) throws IOException {
         var level = helper.getLevel();
         BlockPos center = helper.absolutePos(new BlockPos(7, 6, 7));
-        VoxelRegionTestMod.LOGGER.info("Heightmap fixture before isolation: center={}, {}", center, columnDescription(level, center));
+        RuntimeBridge.LOGGER.info("Heightmap fixture before isolation: center={}, {}", center, columnDescription(level, center));
         // A GameTest structure only bounds its template; generated terrain above it is
         // not necessarily empty. Isolate the complete assertion column using native writes.
         for (int y = center.getY() + 4; y < level.getMaxBuildHeight(); y++)
@@ -184,7 +186,7 @@ public final class RegionGameTests {
         level.setBlock(gateway, Blocks.END_GATEWAY.defaultBlockState(), 18);
         helper.assertTrue(level.getBlockEntity(gateway) instanceof TheEndGatewayBlockEntity, "Gateway fixture has a block entity");
         var originalGateway = level.getBlockEntity(gateway);
-        VoxelRegionTestMod.LOGGER.info("Heightmap fixture initialized: center={}, expected={}, {}", center, center.getY() + 4,
+        RuntimeBridge.LOGGER.info("Heightmap fixture initialized: center={}, expected={}, {}", center, center.getY() + 4,
                 columnDescription(level, center));
         helper.assertTrue(highestNonAir(level, center).getY() == center.getY() + 3,
                 "Isolated column starts at fixture stone top: " + columnDescription(level, center));
@@ -205,7 +207,7 @@ public final class RegionGameTests {
             helper.assertTrue(level.getBlockEntity(chest) == null, "Removed chest leaves no block entity");
             helper.assertTrue(level.getBlockState(outside).is(Blocks.DIAMOND_BLOCK), "Outside block retained");
             BlockPos highest = highestNonAir(level, center);
-            VoxelRegionTestMod.LOGGER.info("Heightmap after region writes: center={}, expected={}, {}", center, center.getY() + 1,
+            RuntimeBridge.LOGGER.info("Heightmap after region writes: center={}, expected={}, {}", center, center.getY() + 1,
                     columnDescription(level, center));
             helper.assertTrue(highest.equals(center) && level.getBlockState(highest).is(Blocks.BEDROCK),
                     "Full column scan ends at protected bedrock: " + columnDescription(level, center));
@@ -245,7 +247,7 @@ public final class RegionGameTests {
         var unfinished = ForgeOperationRunner.submit(level, UUID.randomUUID(), pos, 2, 60, false);
         var restored = OperationData.load(OperationData.get(level).save(new CompoundTag()));
         var recovered = restored.tasks.stream().filter(task -> task.id.equals(unfinished.id)).findFirst().orElseThrow();
-        helper.assertTrue(recovered.state == OperationData.State.PAUSED_RECOVERY, "Interrupted task loads paused for recovery");
+        helper.assertTrue(recovered.state == OperationData.State.RECOVERING, "Interrupted task loads into receipt validation; its SavedData cursor does not authorize replay");
         helper.assertTrue(!ForgeOperationRunner.resume(recovered), "Uncertain recovery cannot replay against later construction");
         ForgeOperationRunner.cancel(unfinished);
         helper.startSequence().thenIdle(5).thenExecute(() -> helper.assertTrue(level.getBlockState(pos).is(Blocks.DIAMOND_BLOCK),

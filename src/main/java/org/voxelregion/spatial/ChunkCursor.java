@@ -21,6 +21,7 @@ import org.voxelregion.geometry.Volume;
  */
 public final class ChunkCursor implements Iterator<ChunkKey> {
     private final Volume volume;
+    private final IntBox clippedBounds;
     private final int minY;
     private final int maxY;
     private final int minChunkX;
@@ -46,6 +47,7 @@ public final class ChunkCursor implements Iterator<ChunkKey> {
         this.volume = Objects.requireNonNull(volume, "volume");
         IntBox clipped = volume.bounds().intersection(new IntBox(IntBox.WORLD_MIN, minY,
                 IntBox.WORLD_MIN, IntBox.WORLD_MAX, maxY, IntBox.WORLD_MAX));
+        this.clippedBounds = clipped;
         this.minY = clipped.minY();
         this.maxY = clipped.maxY();
         exhausted = clipped.isEmpty();
@@ -58,6 +60,83 @@ public final class ChunkCursor implements Iterator<ChunkKey> {
         minRegionZ = regionZ;
         maxRegionX = Math.floorDiv(maxChunkX, 32);
         maxRegionZ = Math.floorDiv(maxChunkZ, 32);
+    }
+
+    /**
+     * Detached next-scan position. No work is performed by checkpoint(). A
+     * prefetched result is normalized back to that result's candidate position,
+     * so it is returned exactly once after restoration. Exhausted positions
+     * have canonical zero coordinates. The format is independent of Java object
+     * serialization; hosts should encode fields with their versioned intent.
+     */
+    public record Checkpoint(int formatVersion, IntBox clippedBounds,
+            int regionX, int regionZ, int chunkX, int chunkZ, boolean exhausted) {
+        public Checkpoint {
+            Objects.requireNonNull(clippedBounds, "clippedBounds");
+            if (formatVersion != 1) throw new IllegalArgumentException("Unsupported chunk cursor checkpoint format");
+            if (exhausted && (regionX != 0 || regionZ != 0 || chunkX != 0 || chunkZ != 0)) {
+                throw new IllegalArgumentException("Exhausted checkpoint must have canonical zero coordinates");
+            }
+        }
+    }
+
+    public Checkpoint checkpoint() {
+        if (next != null) {
+            return new Checkpoint(1, clippedBounds, Math.floorDiv(next.x(), 32), Math.floorDiv(next.z(), 32),
+                    next.x(), next.z(), false);
+        }
+        if (exhausted) return new Checkpoint(1, clippedBounds, 0, 0, 0, 0, true);
+        int x = regionOpen ? chunkX : Math.max(minChunkX, regionX * 32);
+        int z = regionOpen ? chunkZ : Math.max(minChunkZ, regionZ * 32);
+        return new Checkpoint(1, clippedBounds, regionX, regionZ, x, z, false);
+    }
+
+    /**
+     * Restores in constant storage without replaying earlier regions. Validates
+     * bounds, region membership and coordinate consistency; reclassifies at most
+     * one region instead of trusting saved INSIDE evidence. The host must bind
+     * the volume parameters to its durable intent hash and authenticate progress
+     * using its receipts. A geometrically valid position cannot prove that
+     * earlier world writes completed; this method grants no recovery authority.
+     */
+    public static ChunkCursor restore(Volume volume, int minY, int maxY, Checkpoint checkpoint) {
+        Objects.requireNonNull(checkpoint, "checkpoint");
+        ChunkCursor cursor = new ChunkCursor(volume, minY, maxY);
+        if (!cursor.clippedBounds.equals(checkpoint.clippedBounds())) {
+            throw new IllegalArgumentException("Checkpoint bounds do not match this volume and height");
+        }
+        if (checkpoint.exhausted()) {
+            cursor.exhausted = true;
+            return cursor;
+        }
+        if (cursor.exhausted || checkpoint.regionX() < cursor.regionX || checkpoint.regionX() > cursor.maxRegionX
+                || checkpoint.regionZ() < cursor.minRegionZ || checkpoint.regionZ() > cursor.maxRegionZ
+                || checkpoint.chunkX() < cursor.minChunkX || checkpoint.chunkX() > cursor.maxChunkX
+                || checkpoint.chunkZ() < cursor.minChunkZ || checkpoint.chunkZ() > cursor.maxChunkZ
+                || Math.floorDiv(checkpoint.chunkX(), 32) != checkpoint.regionX()
+                || Math.floorDiv(checkpoint.chunkZ(), 32) != checkpoint.regionZ()) {
+            throw new IllegalArgumentException("Checkpoint is outside its clipped region/chunk range");
+        }
+        cursor.regionX = checkpoint.regionX();
+        cursor.regionZ = checkpoint.regionZ();
+        int firstX = Math.max(cursor.minChunkX, cursor.regionX * 32);
+        int firstZ = Math.max(cursor.minChunkZ, cursor.regionZ * 32);
+        cursor.chunkX = checkpoint.chunkX();
+        cursor.chunkZ = checkpoint.chunkZ();
+        cursor.startChunkZ = firstZ;
+        cursor.endChunkX = Math.min(cursor.maxChunkX, cursor.regionX * 32 + 31);
+        cursor.endChunkZ = Math.min(cursor.maxChunkZ, cursor.regionZ * 32 + 31);
+        cursor.regionCoverage = volume.classify(new IntBox(firstX * 16, cursor.minY, firstZ * 16,
+                (cursor.endChunkX + 1) * 16, cursor.maxY, (cursor.endChunkZ + 1) * 16));
+        if (cursor.regionCoverage == Coverage.OUTSIDE) {
+            if (cursor.chunkX != firstX || cursor.chunkZ != firstZ) {
+                throw new IllegalArgumentException("Checkpoint cannot be inside a skipped OUTSIDE region");
+            }
+            cursor.regionOpen = false;
+        } else {
+            cursor.regionOpen = true;
+        }
+        return cursor;
     }
 
     @Override

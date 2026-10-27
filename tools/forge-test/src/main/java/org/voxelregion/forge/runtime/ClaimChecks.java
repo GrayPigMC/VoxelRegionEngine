@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MPL-2.0 */
-package org.voxelregion.testmod;
+package org.voxelregion.forge.runtime;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
@@ -28,7 +28,7 @@ final class ClaimChecks {
             if (protectEveryClaim) return Decision.DENY;
             return Boolean.TRUE.equals(explosions.invoke(getTeam.invoke(claim))) ? Decision.ALLOW : Decision.DENY;
         } catch (ReflectiveOperationException | RuntimeException | LinkageError ex) {
-            if (failure == null) VoxelRegionTestMod.LOGGER.error("FTB protection API unavailable; region operations fail closed", ex);
+            if (failure == null) RuntimeBridge.LOGGER.error("FTB protection API unavailable; region operations fail closed", ex);
             failure = ex;
             return Decision.UNAVAILABLE;
         }
@@ -51,7 +51,7 @@ final class ClaimChecks {
             explosions = Class.forName("dev.ftb.mods.ftbchunks.api.ChunkTeamData").getMethod("canExplosionsDamageTerrain");
         } catch (ReflectiveOperationException | RuntimeException | LinkageError ex) {
             failure = ex;
-            VoxelRegionTestMod.LOGGER.error("Unsupported FTB public API; region operations fail closed", ex);
+            RuntimeBridge.LOGGER.error("Unsupported FTB public API; region operations fail closed", ex);
         }
     }
     private ClaimChecks() {}

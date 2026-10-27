@@ -1,0 +1,21 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "org.voxelregion.forge.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "refmap": "voxelregion-forge.refmap.json",
+  "mixins": [
+    "MinecraftServerTickMixin",
+    "ChunkMapAccessMixin",
+    "NativeStoreMixin",
+    "LightFenceMixin",
+    "SectionStatsMixin",
+    "SkySourcesAccessMixin",
+    "DropSuppressionMixin",
+    "GenerationChunkMapMixin",
+    "FlatGenerationMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

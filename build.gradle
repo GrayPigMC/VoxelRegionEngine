@@ -5,6 +5,8 @@ plugins {
 
 group = 'org.voxelregion'
 version = '0.1.0'
+// Keep the public artifact name stable when included as the Forge build's :engine project.
+base { archivesName = 'voxel-region-engine' }
 
 java {
     toolchain.languageVersion = JavaLanguageVersion.of(17)
