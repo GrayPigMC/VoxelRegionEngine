@@ -1,0 +1,52 @@
+plugins {
+    id 'dev.architectury.loom' version '1.6-SNAPSHOT'
+}
+
+group = 'org.voxelregion'
+version = '0.1.0'
+base { archivesName = 'voxel-region-forge-test-1.20.1' }
+java {
+    sourceCompatibility = targetCompatibility = JavaVersion.VERSION_17
+}
+repositories { mavenCentral() }
+loom { silentMojangMappingsLicense() }
+if (project.hasProperty('verification')) {
+    sourceSets.main.java.srcDir 'src/verification/java'
+    sourceSets.main.resources.srcDir 'src/verification/resources'
+    loom.runs {
+        gameTest {
+            server()
+            runDir(project.findProperty('verificationRunDirectory') ?: 'run-gametest')
+            property 'forge.gameTestServer', 'true'
+            property 'forge.enabledGameTestNamespaces', 'voxelregion_test'
+            vmArg '-XX:ActiveProcessorCount=1'
+        }
+    }
+    tasks.matching { it.name == 'runGameTest' }.configureEach {
+        doFirst { workingDir.mkdirs() }
+    }
+}
+dependencies {
+    minecraft 'com.mojang:minecraft:1.20.1'
+    forge 'net.minecraftforge:forge:1.20.1-47.3.7'
+    mappings loom.officialMojangMappings()
+    implementation project(':engine')
+    // Loom's development Forge launch builds a separate legacy runtime classpath.
+    // Include the portable library there as well as in the production nested jar.
+    forgeRuntimeLibrary project(':engine')
+    include project(':engine')
+}
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 17
+}
+processResources {
+    inputs.property 'version', project.version
+    filesMatching('META-INF/mods.toml') { expand version: project.version }
+}
+jar {
+    from('../../LICENSE') { rename { 'LICENSE-voxel-region-engine' } }
+    // ProcessResources can retain files from an earlier verification invocation.
+    exclude 'org/voxelregion/testmod/RegionGameTests*', 'org/voxelregion/testmod/ProbeBlocks*'
+    exclude 'data/voxelregion_test/structures/empty.nbt'
+}

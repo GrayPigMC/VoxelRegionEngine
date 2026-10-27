@@ -1,0 +1,30 @@
+modLoader="javafml"
+loaderVersion="[47,)"
+license="MPL-2.0"
+
+[[mods]]
+modId="voxelregion_test"
+version="${version}"
+displayName="Voxel Region Engine Test Adapter"
+description='''Local Forge 1.20.1 validation adapter with permission-controlled configurable region charges. Native world mutation baseline; unsupported generation shortcuts stay disabled.'''
+
+[[dependencies.voxelregion_test]]
+modId="forge"
+mandatory=true
+versionRange="[47.3.7,48)"
+ordering="NONE"
+side="BOTH"
+
+[[dependencies.voxelregion_test]]
+modId="minecraft"
+mandatory=true
+versionRange="[1.20.1,1.20.2)"
+ordering="NONE"
+side="BOTH"
+
+[[dependencies.voxelregion_test]]
+modId="ftbchunks"
+mandatory=false
+versionRange="[2001.3.1,)"
+ordering="AFTER"
+side="BOTH"

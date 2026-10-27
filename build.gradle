@@ -1,0 +1,55 @@
+plugins {
+    id 'java-library'
+    id 'maven-publish'
+}
+
+group = 'org.voxelregion'
+version = '0.1.0'
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of(17)
+    withSourcesJar()
+    withJavadocJar()
+}
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 17
+}
+tasks.withType(Javadoc).configureEach {
+    options.encoding = 'UTF-8'
+    options.addBooleanOption('Xdoclint:none', true)
+}
+tasks.withType(AbstractArchiveTask).configureEach {
+    preserveFileTimestamps = false
+    reproducibleFileOrder = true
+}
+tasks.named('jar') {
+    from(files('LICENSE', 'NOTICE')) { into 'META-INF' }
+    manifest.attributes('Automatic-Module-Name': 'org.voxelregion.engine',
+            'FMLModType': 'GAMELIBRARY',
+            'Implementation-Version': project.version, 'Implementation-Title': 'VoxelRegionEngine')
+}
+sourceSets.test.java.srcDirs = ['tests/java']
+tasks.register('regression', JavaExec) {
+    group = 'verification'
+    description = 'Dependency-free geometry, planning, scheduling and recovery checks.'
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'org.voxelregion.AllTests'
+    jvmArgs '-ea', '-Xmx512m'
+}
+tasks.named('check') { dependsOn 'regression' }
+tasks.register('geometryBenchmark', JavaExec) {
+    group = 'verification'
+    description = 'Geometry-only measurements; does not measure Minecraft world mutation.'
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'org.voxelregion.GeometryBenchmark'
+    jvmArgs '-ea', '-Xmx512m', '-XX:ActiveProcessorCount=1', '-XX:+UseSerialGC'
+    args '--samples'
+}
+publishing {
+    publications {
+        library(MavenPublication) { from components.java }
+    }
+}
