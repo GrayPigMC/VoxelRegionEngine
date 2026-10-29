@@ -13,6 +13,7 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.entity.vehicle.ContainerEntity;
 import net.minecraft.world.level.ChunkPos;
 import org.voxelregion.forge.EntityStorageBridge;
 import org.voxelregion.forge.ForgeEntityOperations;
@@ -145,7 +146,16 @@ public final class EntityOperationRunner {
         if (RuntimeBridge.availableMetadataBytes(job.level.getServer()) < 128)
             throw new IllegalStateException("Entity deduplication exceeds the shared metadata allowance");
         job.seen.add(entity.getUUID());
-        if (job.options.mode() == ForgeEntityOperations.Mode.DISCARD && !(entity instanceof Player)) entity.discard();
+        if (job.options.mode() == ForgeEntityOperations.Mode.DISCARD && !(entity instanceof Player)) {
+            if (entity instanceof ContainerEntity container) {
+                // Container vehicles drop inventory even for DISCARDED. Do not use clearContent():
+                // it unpacks unopened loot before clearing, which can also invoke loot callbacks.
+                container.setLootTable(null);
+                container.setLootTableSeed(0L);
+                container.getItemStacks().clear();
+            }
+            entity.discard();
+        }
         else {
             entity.kill();
             // Hidden entities do not run death ticks; successful non-player kills must not be saved as stranded corpses.

@@ -20,7 +20,7 @@ public final class ForgeEntityOperations {
 
     /** DISCARD avoids normal non-player death drops. Players always use their normal kill path. */
     public record Options(boolean includePlayers, Scope scope, Mode mode) {
-        public static final Options DEFAULT = new Options(true, Scope.LOAD_EXISTING_SAVED, Mode.KILL);
+        public static final Options DEFAULT = new Options(true, Scope.LOAD_EXISTING_SAVED, Mode.DISCARD);
         public Options { Objects.requireNonNull(scope); Objects.requireNonNull(mode); }
     }
     public record Handle(ResourceLocation dimension, UUID id) {

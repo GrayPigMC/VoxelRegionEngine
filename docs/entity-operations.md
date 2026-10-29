@@ -24,12 +24,12 @@ var progress = ForgeEntityOperations.status(level, handle.id());
 boolean cancelled = ForgeEntityOperations.cancel(level, handle.id());
 ```
 
-默认 `Options(true, LOAD_EXISTING_SAVED, KILL)` **包含玩家**，并读取范围内尚未加载的已保存实体。需要排除玩家时显式指定：
+默认 `Options(true, LOAD_EXISTING_SAVED, DISCARD)` **包含玩家**，并读取范围内尚未加载的已保存实体。范围内的生物、箱子矿车、漏斗矿车、箱船、普通船、掉落物和弹射物等都属于实体目标，并非只选择 `LivingEntity`。玩家仍走原生死亡流程；非玩家默认直接移除。需要排除玩家时显式指定：
 
 ```java
 var options = new ForgeEntityOperations.Options(false,
         ForgeEntityOperations.Scope.LOAD_EXISTING_SAVED,
-        ForgeEntityOperations.Mode.KILL);
+        ForgeEntityOperations.Mode.DISCARD);
 ```
 
 | 选项 | 行为 |
@@ -40,6 +40,10 @@ var options = new ForgeEntityOperations.Options(false,
 | `LOAD_EXISTING_SAVED` | 通过原生实体存储异步读取已保存实体；扫描器不为寻找实体而生成地形。 |
 | `KILL` | 调用原生死亡路径；保留原生事件、掉落与模组回调语义，这些回调可能自行读取或加载地形。 |
 | `DISCARD` | 直接移除非玩家实体，避免主动触发生物死亡掉落；包含玩家时，玩家仍走原生死亡流程。 |
+
+需要正常击杀回调、战利品和死亡事件时，显式选择 `Mode.KILL`。普通箱子属于方块/方块实体，由地形 API 处理；箱子矿车和箱船属于本 API 的实体目标。
+
+`DISCARD` 对原生 `ContainerEntity`（包括箱子矿车、漏斗矿车、箱船）先清空库存并移除待展开的战利品信息，再执行移除，防止容器把内容物重新变成掉落物。这里不调用会展开战利品表的 `clearContent()`，也不会为销毁未开启的容器先生成战利品。选区外容器保持原状；`KILL` 保留正常行为。自定义模组的额外移除回调若另行生成实体，需由宿主进一步对接。
 
 球、盒、柱和组合几何都使用实体位置的连续坐标判断，不以所在方块中心代替实体位置，也不以碰撞箱与选区相交作为全部命中条件。几何内部的差集空洞会保留实体。区块扫描采用保守范围，因此球面恰好落在相邻区块边界上的实体也会进入精确判断。
 

@@ -5,6 +5,7 @@ import com.mojang.authlib.GameProfile;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -12,6 +13,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BiConsumer;
 import net.minecraft.core.BlockPos;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.TicketType;
 import net.minecraft.world.damagesource.DamageSource;
@@ -19,12 +21,18 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.animal.Cow;
 import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.entity.vehicle.ChestBoat;
+import net.minecraft.world.entity.vehicle.ContainerEntity;
+import net.minecraft.world.entity.vehicle.MinecartChest;
+import net.minecraft.world.entity.vehicle.MinecartHopper;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.storage.IOWorker;
 import net.minecraft.world.level.entity.PersistentEntitySectionManager;
+import net.minecraft.world.phys.AABB;
 import net.minecraftforge.common.util.FakePlayer;
 import org.voxelregion.forge.ForgeEntityOperations;
 import org.voxelregion.forge.RegionGeometry;
@@ -45,9 +53,13 @@ public final class EntityOperationScenario implements AutoCloseable {
     private final RegionGeometry loadedBox, savedBox;
     private LevelChunk oldSaved;
     private Cow target, outside, savedCow, vetoCow, discardTarget;
-    private ItemEntity item, savedOutside, boundary, boundaryOutside;
+    private ItemEntity item, discardItem, savedOutside, boundary, boundaryOutside;
     private FakePlayer player;
-    private UUID savedTargetId, savedOutsideId, vetoId, discardId;
+    private UUID savedTargetId, savedOutsideId, vetoId, discardId, savedCartId;
+    private MinecartChest outsideCart;
+    private PendingLootCart pendingLootCart;
+    private final List<Entity> disposableVehicles = new ArrayList<>();
+    private Set<UUID> itemsBeforeDiscard;
     private ForgeEntityOperations.Handle operation;
     private CompletableFuture<Boolean> absentRead;
     private int stage, ticks;
@@ -110,13 +122,49 @@ public final class EntityOperationScenario implements AutoCloseable {
                 report.accept("LOADED_KILL_PASS", Map.of("affected", status().affected(), "skippedPlayers", status().skippedPlayers(),
                         "nativeKillVetoSurvivors", status().surviving()));
                 check(ForgeEntityOperations.Options.DEFAULT.includePlayers(), "Default explicitly includes players");
+                check(ForgeEntityOperations.Options.DEFAULT.mode() == ForgeEntityOperations.Mode.DISCARD, "Default explicitly discards non-players");
+                var chest = vehicle(new MinecartChest(level, x + 2, y + 1, z + 5));
+                chest.getItemStacks().set(0, new ItemStack(Items.EMERALD, 64));
+                disposableVehicles.add(chest);
+                pendingLootCart = new PendingLootCart(level);
+                pendingLootCart.setPos(x + 3.5, y + 1, z + 5);
+                vehicle(pendingLootCart);
+                pendingLootCart.setLootTable(new ResourceLocation("minecraft", "chests/abandoned_mineshaft"), 17431L);
+                check(pendingLootCart.getLootTable() != null && pendingLootCart.pendingUnpacks == 0,
+                        "Unopened chest minecart has real pending loot metadata");
+                disposableVehicles.add(pendingLootCart);
+                var hopper = vehicle(new MinecartHopper(level, x + 5, y + 1, z + 5));
+                hopper.getItemStacks().set(0, new ItemStack(Items.GOLD_INGOT, 23));
+                disposableVehicles.add(hopper);
+                var boat = vehicle(new ChestBoat(level, x + 6.5, y + 1, z + 6.5));
+                boat.getItemStacks().set(0, new ItemStack(Items.NETHERITE_INGOT, 17));
+                disposableVehicles.add(boat);
+                outsideCart = vehicle(new MinecartChest(level, x + 8.25, y + 1, z + 5));
+                outsideCart.getItemStacks().set(0, new ItemStack(Items.LAPIS_LAZULI, 31));
+                discardItem = item(x + 4, y + 1, z + 7);
+                itemsBeforeDiscard = itemIds(new AABB(x - 2, y - 3, z - 2, x + 20, y + 8, z + 20));
                 operation = ForgeEntityOperations.submit(level, loadedBox, ForgeEntityOperations.Options.DEFAULT);
                 stage = 2;
             }
             case 2 -> {
                 if (!applied()) return false;
-                check(!player.isAlive(), "Default KILL kills the included player");
-                check(!player.isRemoved(), "KILL does not discard the player object");
+                check(!player.isAlive(), "Default DISCARD still uses native kill for included players");
+                check(!player.isRemoved(), "Native player kill does not discard the player object");
+                check(vetoCow.isRemoved(), "Non-player DISCARD is independent of damage-event veto");
+                check(discardItem.isRemoved(), "Default DISCARD removes item entities");
+                for (var vehicle : disposableVehicles) {
+                    check(vehicle.isRemoved(), "Default removes container vehicle " + vehicle.getType());
+                    check(((ContainerEntity)vehicle).getItemStacks().stream().allMatch(ItemStack::isEmpty), "Removed vehicle retains no cargo");
+                }
+                check(pendingLootCart.pendingUnpacks == 0 && pendingLootCart.getLootTable() == null,
+                        "Pending minecart loot is cleared without unpacking");
+                check(!outsideCart.isRemoved() && outsideCart.getItemStacks().get(0).getCount() == 31,
+                        "Outside-center vehicle and its cargo remain intact although its box overlaps the region");
+                var afterItems = itemIds(new AABB(x - 2, y - 3, z - 2, x + 20, y + 8, z + 20));
+                afterItems.removeAll(itemsBeforeDiscard);
+                check(afterItems.isEmpty(), "Default DISCARD does not create vehicle cargo or loot drops");
+                report.accept("CONTAINER_DISCARD_PASS", Map.of("vehicles", disposableVehicles.size(), "pendingLootUnpacks", pendingLootCart.pendingUnpacks,
+                        "newItemEntities", afterItems.size(), "outsideVehicleCargoRetained", true));
                 level.removePlayerImmediately(player, Entity.RemovalReason.DISCARDED);
                 player = null;
                 // Two radius 0.5 spheres tangent at a chunk boundary have a continuous
@@ -176,7 +224,8 @@ public final class EntityOperationScenario implements AutoCloseable {
             case 7 -> {
                 if (!trulyUnloaded()) return false;
                 entityManager().saveAll();
-                operation = ForgeEntityOperations.submit(level, savedBox, ForgeEntityOperations.Options.DEFAULT);
+                operation = ForgeEntityOperations.submit(level, savedBox,
+                        new ForgeEntityOperations.Options(true, ForgeEntityOperations.Scope.LOAD_EXISTING_SAVED, ForgeEntityOperations.Mode.KILL));
                 stage = 8;
             }
             case 8 -> {
@@ -196,8 +245,10 @@ public final class EntityOperationScenario implements AutoCloseable {
                 check(dead == null || !dead.isAlive(), "Killed saved target does not return alive after reload");
                 var kept = level.getEntity(savedOutsideId);
                 check(kept != null && kept.isAlive(), "Outside-volume saved entity survives same-chunk load/action/save cycle");
-                report.accept("SAVED_SCOPE_PASS", Map.of("loadedOnlyPreserved", true, "defaultKilledSaved", true, "outsideSavedRetained", true));
+                report.accept("SAVED_SCOPE_PASS", Map.of("loadedOnlyPreserved", true, "explicitKilledSaved", true, "outsideSavedRetained", true));
                 discardTarget = cow(savedPosition.getMinBlockX() + 3, y + 1, z + 3); discardId = discardTarget.getUUID();
+                var savedCart = vehicle(new MinecartChest(level, savedPosition.getMinBlockX() + 5, y + 1, z + 3));
+                savedCart.getItemStacks().set(0, new ItemStack(Items.NETHERITE_BLOCK, 64)); savedCartId = savedCart.getUUID();
                 oldSaved = current; unloaded.remove(oldSaved);
                 entityManager().saveAll(); release(savedPosition); operation = null; stage = 13;
             }
@@ -227,13 +278,12 @@ public final class EntityOperationScenario implements AutoCloseable {
                 if (!trulyUnloaded()) return false;
                 check(discardTarget.isRemoved() && level.getEntity(discardId) == null, "Discard fixture genuinely unloaded its original entity");
                 entityManager().saveAll();
-                operation = ForgeEntityOperations.submit(level, savedBox,
-                        new ForgeEntityOperations.Options(false, ForgeEntityOperations.Scope.LOAD_EXISTING_SAVED, ForgeEntityOperations.Mode.DISCARD));
+                operation = ForgeEntityOperations.submit(level, savedBox, ForgeEntityOperations.Options.DEFAULT);
                 stage = 14;
             }
             case 14 -> {
                 if (!applied()) return false;
-                check(status().affected() >= 1, "Saved DISCARD affects actually unloaded target");
+                check(status().affected() >= 2, "Default saved DISCARD affects actually unloaded mob and cargo minecart");
                 check(level.getChunkSource().getChunkNow(savedPosition.x, savedPosition.z) == null, "Saved non-player DISCARD does not load terrain");
                 entityManager().saveAll(); hold(savedPosition); stage = 15;
             }
@@ -242,9 +292,14 @@ public final class EntityOperationScenario implements AutoCloseable {
                 if (current == null || !level.areEntitiesLoaded(savedPosition.toLong())) return false;
                 check(current != oldSaved, "Discard readback reloads a fresh terrain chunk");
                 check(level.getEntity(discardId) == null, "Discarded saved target remains absent after native save/reload");
+                check(level.getEntity(savedCartId) == null, "Discarded saved cargo minecart remains absent after native save/reload");
+                check(level.getEntitiesOfClass(ItemEntity.class, new AABB(savedPosition.getMinBlockX(), y - 3, z,
+                        savedPosition.getMinBlockX() + 16, y + 8, z + 16)).stream()
+                        .noneMatch(entity -> entity.getItem().is(Items.NETHERITE_BLOCK)), "Saved minecart cargo was not dropped during DISCARD");
                 var kept = level.getEntity(savedOutsideId);
                 check(kept != null && kept.isAlive(), "Outside saved control remains after DISCARD save/reload");
-                report.accept("SAVED_DISCARD_PASS", Map.of("noTerrainLoaded", true, "targetAbsentOnReload", true, "outsideRetained", true));
+                report.accept("SAVED_DISCARD_PASS", Map.of("noTerrainLoaded", true, "targetAbsentOnReload", true,
+                        "cargoMinecartAbsentOnReload", true, "cargoDropped", false, "outsideRetained", true));
                 absentRead = absentTerrain(); stage = 10;
             }
             default -> throw new AssertionError("Unknown fixture stage " + stage);
@@ -280,6 +335,23 @@ public final class EntityOperationScenario implements AutoCloseable {
         item.setNoGravity(true); item.setDeltaMovement(0, 0, 0); item.setPickUpDelay(32767);
         check(level.addFreshEntity(item), "Item insertion"); fixtureEntities.add(item); return item;
     }
+    private <T extends Entity & ContainerEntity> T vehicle(T vehicle) {
+        vehicle.setNoGravity(true); vehicle.setDeltaMovement(0, 0, 0);
+        check(level.addFreshEntity(vehicle), "Container vehicle insertion"); fixtureEntities.add(vehicle); return vehicle;
+    }
+    private Set<UUID> itemIds(AABB box) {
+        var ids = new HashSet<UUID>();
+        for (var entity : level.getEntitiesOfClass(ItemEntity.class, box)) ids.add(entity.getUUID());
+        return ids;
+    }
+    private static final class PendingLootCart extends MinecartChest {
+        int pendingUnpacks;
+        PendingLootCart(ServerLevel level) { super(EntityType.CHEST_MINECART, level); }
+        @Override public void unpackChestVehicleLootTable(Player player) {
+            if (getLootTable() != null) pendingUnpacks++;
+            super.unpackChestVehicleLootTable(player);
+        }
+    }
     private void hold(ChunkPos position) {
         level.getChunkSource().addRegionTicket(HOLD, position, 0, owner); tickets.add(position);
     }
@@ -302,7 +374,10 @@ public final class EntityOperationScenario implements AutoCloseable {
         closed = true;
         if (operation != null && !status().terminal()) ForgeEntityOperations.cancel(level, operation.id());
         if (player != null) level.removePlayerImmediately(player, Entity.RemovalReason.DISCARDED);
-        for (Entity entity : fixtureEntities) if (!entity.isRemoved()) entity.discard();
+        for (Entity entity : fixtureEntities) if (!entity.isRemoved()) {
+            if (entity instanceof ContainerEntity container) { container.setLootTable(null); container.getItemStacks().clear(); }
+            entity.discard();
+        }
         for (var position : List.copyOf(tickets)) release(position);
     }
 }
