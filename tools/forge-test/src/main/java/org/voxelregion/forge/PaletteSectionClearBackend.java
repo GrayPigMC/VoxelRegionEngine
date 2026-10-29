@@ -109,6 +109,7 @@ public final class PaletteSectionClearBackend {
         private final boolean replaySkySources;
         private final Predicate<BlockState> mayClear;
         private final HostHooks hooks;
+        private PostProcessingClearance postProcessing;
         private boolean consumed;
         private boolean observerActive;
 
@@ -169,6 +170,13 @@ public final class PaletteSectionClearBackend {
         /** Selected unknown states retain native callbacks; callers process these after the safe batch. */
         public BitSet nativeRemainder() { return (BitSet) nativeRemainder.clone(); }
         public int nativeRemainderCount() { return nativeRemainder.cardinality(); }
+        /** Restricted read-only preflight for the matching post-processing token, not a commit guarantee. */
+        boolean preparesVanillaAir(PostProcessingClearance proof, int x, int y, int z) {
+            return proof == postProcessing && !consumed && level.getServer().isSameThread()
+                    && currentChunk(level, chunk) && hooks.mutationRevision(chunk) == revision
+                    && chunk.getSection(sectionIndex) == original
+                    && isVanillaAir(replacement == null ? AIR : replacement.getBlockState(x, y, z));
+        }
         /** Actual changed mask, available only during the synchronous aggregate observer. */
         public boolean changed(int localX, int localY, int localZ) {
             checkObserver(localX, localY, localZ);
@@ -202,6 +210,11 @@ public final class PaletteSectionClearBackend {
 
     public static Preparation prepare(ServerLevel level, LevelChunk chunk, int sectionIndex,
                                       Predicate<BlockState> mayClear, HostHooks hooks) {
+        return prepare(level, chunk, sectionIndex, mayClear, hooks, null);
+    }
+
+    private static Preparation prepare(ServerLevel level, LevelChunk chunk, int sectionIndex,
+                                      Predicate<BlockState> mayClear, HostHooks hooks, PostProcessingClearance postProcessing) {
         Objects.requireNonNull(level); Objects.requireNonNull(chunk);
         Objects.requireNonNull(mayClear); Objects.requireNonNull(hooks);
         if (!level.getServer().isSameThread()) return rejected(Rejection.WRONG_THREAD);
@@ -211,7 +224,7 @@ public final class PaletteSectionClearBackend {
         if (!hooks.supportsBulk(level)) return rejected(Rejection.HOST_UNSUPPORTED);
         long revision = hooks.mutationRevision(chunk);
         if (revision < 0 || revision == Long.MAX_VALUE) return rejected(Rejection.TRACKING_UNAVAILABLE);
-        Rejection auxiliary = auxiliaryState(chunk, sectionIndex);
+        Rejection auxiliary = auxiliaryState(chunk, sectionIndex, postProcessing);
         if (auxiliary != Rejection.NONE) return rejected(auxiliary);
         LevelChunkSection original = chunk.getSection(sectionIndex);
         if (!(original instanceof NativeAccess.SectionStats stats)
@@ -252,6 +265,20 @@ public final class PaletteSectionClearBackend {
      */
     public static Preparation prepareSelected(ServerLevel level, LevelChunk chunk, int sectionIndex, BitSet selected,
                                               Predicate<BlockState> mayClear, HostHooks hooks) {
+        return prepareSelected(level, chunk, sectionIndex, selected, mayClear, hooks, null);
+    }
+
+    /** Explicit opt-in: preparation retains every pending native list until the caller's verified commit. */
+    public static Preparation prepareSelected(ServerLevel level, LevelChunk chunk, int sectionIndex, BitSet selected,
+                                              Predicate<BlockState> mayClear, HostHooks hooks, PostProcessingClearance postProcessing) {
+        if (postProcessing != null && !postProcessing.currentRevision(level, chunk)) return rejected(Rejection.STALE);
+        Preparation result = prepareSelectedInternal(level, chunk, sectionIndex, selected, mayClear, hooks, postProcessing);
+        if (result.accepted()) result.prepared.postProcessing = postProcessing;
+        return result;
+    }
+
+    private static Preparation prepareSelectedInternal(ServerLevel level, LevelChunk chunk, int sectionIndex, BitSet selected,
+                                              Predicate<BlockState> mayClear, HostHooks hooks, PostProcessingClearance postProcessing) {
         Objects.requireNonNull(level); Objects.requireNonNull(chunk);
         Objects.requireNonNull(mayClear); Objects.requireNonNull(hooks);
         if (selected != null && selected.length() > 4096) throw new IllegalArgumentException("Selection exceeds section");
@@ -263,8 +290,10 @@ public final class PaletteSectionClearBackend {
         if (!hooks.supportsBulk(level)) return rejected(Rejection.HOST_UNSUPPORTED);
         long revision = hooks.mutationRevision(chunk);
         if (revision < 0 || revision == Long.MAX_VALUE) return rejected(Rejection.TRACKING_UNAVAILABLE);
-        var postProcessing = chunk.getPostProcessing()[sectionIndex];
-        if (postProcessing != null && !postProcessing.isEmpty()) return rejected(Rejection.POST_PROCESSING);
+        var pending = chunk.getPostProcessing()[sectionIndex];
+        if (pending != null && !pending.isEmpty()
+                && (postProcessing == null || !postProcessing.matchesSection(level, chunk, sectionIndex)))
+            return rejected(Rejection.POST_PROCESSING);
         LevelChunkSection original = chunk.getSection(sectionIndex);
         if (!(original instanceof NativeAccess.SectionStats stats)) return rejected(Rejection.TRACKING_UNAVAILABLE);
         int originalCount = stats.vre$accurateNonAirCount();
@@ -272,7 +301,7 @@ public final class PaletteSectionClearBackend {
         // Preserve the O(palette) all-clear path. An unused old unsupported palette entry merely
         // sends this attempt to actual-state planning; it no longer blocks the whole section.
         if (selection == null || selection.cardinality() == 4096) {
-            var whole = prepare(level, chunk, sectionIndex, mayClear, hooks);
+            var whole = prepare(level, chunk, sectionIndex, mayClear, hooks, postProcessing);
             if (whole.accepted()) return whole;
             if (hooks.mutationRevision(chunk) != revision || chunk.getSection(sectionIndex) != original)
                 return rejected(Rejection.STALE);
@@ -284,7 +313,7 @@ public final class PaletteSectionClearBackend {
         Set<BlockState> nativeStates = Collections.newSetFromMap(new IdentityHashMap<>());
         // A retained-only palette (usually the bedrock band) needs no voxel decoding,
         // replacement encoding, or light repair. Unused entries can only reject this proof.
-        if (selection == null && auxiliaryState(chunk, sectionIndex) == Rejection.NONE) {
+        if (selection == null && auxiliaryState(chunk, sectionIndex, postProcessing) == Rejection.NONE) {
             boolean actionable = original.maybeHas(state -> {
                 if (isVanillaAir(state)) return false;
                 if (!isSupportedState(state, level, minimum) || mayClear.test(state)) return true;
@@ -377,8 +406,10 @@ public final class PaletteSectionClearBackend {
         if (!first.level.getServer().isSameThread() || !currentChunk(first.level, first.chunk)
                 || first.level.captureBlockSnapshots || first.hooks.mutationRevision(first.chunk) != first.revision)
             return false;
+        if (first.postProcessing != null && !first.postProcessing.matchesMetadata()) return false;
         for (Prepared plan : plans) {
             if (plan.consumed || plan.level != first.level || plan.chunk != first.chunk || plan.hooks != first.hooks
+                    || plan.postProcessing != first.postProcessing
                     || plan.revision != first.revision || plan.chunk.getSection(plan.sectionIndex) != plan.original
                     || ((NativeAccess.SectionStats) plan.original).vre$accurateNonAirCount() != plan.originalNonAir
                     || hasChangedBlockEntity(plan))
@@ -408,10 +439,12 @@ public final class PaletteSectionClearBackend {
         Set<Integer> sectionIndices = new HashSet<>();
         for (Prepared plan : plans) {
             if (plan.level != level || plan.chunk != chunk || plan.revision != first.revision || plan.hooks != first.hooks
+                    || plan.postProcessing != first.postProcessing
                     || !sectionIndices.add(plan.sectionIndex))
                 throw new IllegalArgumentException("Batch must contain unique sections from one chunk, revision and host");
             if (plan.consumed) return notApplied(CommitResult.ALREADY_CONSUMED);
         }
+        if (first.postProcessing != null && !first.postProcessing.plansEraseAll(plans)) return notApplied(CommitResult.STALE);
         plans.forEach(plan -> plan.consumed = true);
         if (!currentChunk(level, chunk) || level.captureBlockSnapshots) return notApplied(CommitResult.STALE);
         HostHooks hooks = first.hooks;
@@ -431,13 +464,15 @@ public final class PaletteSectionClearBackend {
         if (!finalPermission.getAsBoolean()) return notApplied(CommitResult.PERMISSION_DENIED);
         if (!currentChunk(level, chunk) || level.captureBlockSnapshots
                 || hooks.mutationRevision(chunk) != first.revision + changedSections) return notApplied(CommitResult.STALE);
+        if (first.postProcessing != null && !first.postProcessing.matchesMetadata()) return notApplied(CommitResult.STALE);
         for (Prepared plan : plans)
             if (chunk.getSection(plan.sectionIndex) != plan.original
                     || ((NativeAccess.SectionStats) plan.original).vre$accurateNonAirCount() != plan.originalNonAir
                     || hasChangedBlockEntity(plan)
-                    || (plan.changed == null && auxiliaryState(chunk, plan.sectionIndex) != Rejection.NONE)
+                    || (plan.changed == null && auxiliaryState(chunk, plan.sectionIndex, plan.postProcessing) != Rejection.NONE)
                     || (chunk.getPostProcessing()[plan.sectionIndex] != null
-                    && !chunk.getPostProcessing()[plan.sectionIndex].isEmpty())) return notApplied(CommitResult.STALE);
+                    && !chunk.getPostProcessing()[plan.sectionIndex].isEmpty()
+                    && plan.postProcessing == null)) return notApplied(CommitResult.STALE);
         if (changedSections == 0) return new CommitReport(CommitResult.APPLIED_QUEUED, 0, false,
                 CompletableFuture.completedFuture(null));
 
@@ -557,11 +592,17 @@ public final class PaletteSectionClearBackend {
     }
 
     private static Rejection auxiliaryState(LevelChunk chunk, int sectionIndex) {
+        return auxiliaryState(chunk, sectionIndex, null);
+    }
+
+    private static Rejection auxiliaryState(LevelChunk chunk, int sectionIndex, PostProcessingClearance proof) {
         int sectionY = chunk.getSectionYFromSectionIndex(sectionIndex);
         for (BlockPos position : chunk.getBlockEntitiesPos())
             if ((position.getY() >> 4) == sectionY) return Rejection.BLOCK_ENTITY;
         var postProcessing = chunk.getPostProcessing()[sectionIndex];
-        return postProcessing != null && !postProcessing.isEmpty() ? Rejection.POST_PROCESSING : Rejection.NONE;
+        return postProcessing != null && !postProcessing.isEmpty()
+                && (proof == null || !(chunk.getLevel() instanceof ServerLevel level)
+                || !proof.matchesSection(level, chunk, sectionIndex)) ? Rejection.POST_PROCESSING : Rejection.NONE;
     }
 
     private static boolean hasChangedBlockEntity(Prepared plan) {

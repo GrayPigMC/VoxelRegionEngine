@@ -25,6 +25,8 @@ abstract class NativeStoreMixin implements org.voxelregion.forge.NativeAccess.Du
     @Unique private final java.util.concurrent.atomic.AtomicInteger vre$outstanding = new java.util.concurrent.atomic.AtomicInteger();
     @Unique private boolean vre$draining;
     @Unique private CompletableFuture<Void> vre$queuedFlush;
+    @Unique private final java.util.Set<ChunkPos> vre$queuedFlushPositions = new java.util.LinkedHashSet<>();
+    @Unique private final java.util.Set<CompletableFuture<Void>> vre$flushRequests = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     @Inject(method = "runStore", at = @At("HEAD"), cancellable = true)
     private void vre$parallelRegion(ChunkPos position, @org.spongepowered.asm.mixin.injection.Coerce Object pending, CallbackInfo callback) {
@@ -49,22 +51,42 @@ abstract class NativeStoreMixin implements org.voxelregion.forge.NativeAccess.Du
     @org.spongepowered.asm.mixin.injection.Redirect(method = "close", remap = false,
             at = @At(value = "INVOKE", target = "Lnet/minecraft/util/thread/ProcessorMailbox;close()V", remap = false))
     private void vre$drainBeforeMailboxClose(net.minecraft.util.thread.ProcessorMailbox<?> target) {
+        CompletableFuture<?>[] flushing;
+        synchronized (this) { flushing = vre$flushRequests.toArray(CompletableFuture[]::new); }
+        // Native close calls this on its caller thread after SHUTDOWN admission,
+        // while the mailbox still accepts force-completion and lease-release work.
+        CompletableFuture.allOf(flushing).handle((ignored, error) -> null).join();
         var queues = org.voxelregion.forge.ParallelRegionStores.find(storage);
         if (queues != null) queues.drainBeforeClose();
         target.close();
     }
 
-    @Override public synchronized CompletableFuture<Void> vre$flushStored() {
+    @Override public synchronized CompletableFuture<Void> vre$flushStored(java.util.Collection<ChunkPos> positions) {
         if (shutdownRequested.get()) return CompletableFuture.failedFuture(new IllegalStateException("Chunk storage is closing"));
+        if (positions.isEmpty()) return CompletableFuture.completedFuture(null);
+        vre$queuedFlushPositions.addAll(positions);
         if (vre$queuedFlush != null) return vre$queuedFlush;
         var completion = new CompletableFuture<Void>();
+        vre$flushRequests.add(completion);
+        completion.whenComplete((ignored, error) -> vre$flushRequests.remove(completion));
         vre$queuedFlush = completion;
         // FOREGROUND is priority zero in this version. The native mailbox owns the file
-        // cache and flush admission; independent files flush on workers. Actual store
-        // futures have already completed before this call.
+        // cache and flush admission; only touched files flush on workers. Actual store
+        // futures have already completed before this call. Never wait for worker force
+        // inside this mailbox: reads, new stores and flush lease releases must continue.
         mailbox.tell(new net.minecraft.util.thread.StrictQueue.IntRunnable(0, () -> {
-            synchronized (this) { vre$queuedFlush = null; }
-            try { storage.flush(); completion.complete(null); }
+            java.util.List<ChunkPos> touched;
+            synchronized (this) {
+                touched = java.util.List.copyOf(vre$queuedFlushPositions);
+                vre$queuedFlushPositions.clear(); vre$queuedFlush = null;
+            }
+            try {
+                var queues = org.voxelregion.forge.ParallelRegionStores.create(storage,
+                        task -> mailbox.tell(new net.minecraft.util.thread.StrictQueue.IntRunnable(0, task)));
+                queues.flushStored(touched).whenComplete((ignored, error) -> {
+                    if (error == null) completion.complete(null); else completion.completeExceptionally(error);
+                });
+            }
             catch (Throwable error) { completion.completeExceptionally(error); }
         }));
         return completion;

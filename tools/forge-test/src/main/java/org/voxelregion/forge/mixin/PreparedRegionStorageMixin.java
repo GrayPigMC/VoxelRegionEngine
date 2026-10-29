@@ -20,6 +20,14 @@ abstract class PreparedRegionStorageMixin implements NativeAccess.RegionFiles {
     @Shadow private RegionFile getRegionFile(ChunkPos position) throws IOException { throw new AssertionError(); }
     @Override public RegionFile vre$regionFile(ChunkPos position) throws IOException { return getRegionFile(position); }
 
+    @Redirect(method = "write", at = @At(value = "INVOKE",
+            target = "Lnet/minecraft/world/level/chunk/storage/RegionFile;clear(Lnet/minecraft/world/level/ChunkPos;)V"))
+    private void vre$serializeNativeDelete(RegionFile file, ChunkPos position) throws IOException {
+        // Native no-lane deletes must share the exact same file monitor as detached
+        // forces and compressed writes; RegionFile.clear itself is not synchronized.
+        synchronized (file) { file.clear(position); }
+    }
+
     @Inject(method = "getRegionFile", at = @At("HEAD"), cancellable = true)
     private void vre$reuseLeased(ChunkPos position, CallbackInfoReturnable<RegionFile> callback) {
         var queue = org.voxelregion.forge.ParallelRegionStores.find((RegionFileStorage)(Object)this);

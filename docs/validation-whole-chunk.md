@@ -299,3 +299,97 @@ Core 成品 `release12-gtlcore-1.2.3.3.jar` 的 SHA-256 为 `c8dbcc19cc38d5b5e5d
 `entity-api-native03` 使用相同 Forge、Java、4 CPU 和 4 GiB 设置，46 个场景 tick 完成全部断言并正常停服。新增覆盖包括默认直接移除的掉落物、带货箱子矿车、未开启战利品矿车、漏斗矿车和箱船；未产生新物品实体，战利品展开次数为零，选区外矿车及库存保留。真正卸载的带货矿车在默认清理后重载仍然不存在，也没有产生货物掉落或加载地形。原有玩家、明确 KILL、拒绝死亡、精确边界、取消、未生成区块及持久化检查仍通过。这是功能验证，46 tick 不是大范围吞吐基准。
 
 最终 `release-batch57` 适配器测试包 SHA-256 为 `b829dad378203e1ca7e080381aad8e8ac6b45d993497ccbdb22d6a3852c70509`，编译及制品隔离检查通过。新增 helper 已通过独立探针编译并实际运行；未扩大到完整 Forge/宿主回归，也未重新同步 Core。
+
+## R1024 准备窗口与持久化队列首轮对照（2026-10-29）
+
+针对玩家报告的 `POST_PROCESSING_CHUNK` 等待，本轮将上游加载/后处理准备窗口与下游完成窗口分开，并将持久化同步改为只处理本批实际写入的 region，在工作线程执行同步，避免原生 IOWorker 邮箱等待磁盘。实际 store、光照、持久化和必要发包确认仍是完成条件。下面记录的是 baseline57/candidate59 首轮对照；记录时包含严格后处理消除证明的 candidate60 尚未完成运行，不能套用这些结果。candidate60 的后续结果另记于下文。
+
+两轮均使用标准 Forge 1.20.1 / 47.3.7、Java 17、固定 4 个逻辑 CPU 和 4 GiB 最大堆；普通新世界使用相同种子，命令均为 `execute positioned 100008 100 100008 run vreprobe bench 1024 false`，保留基岩、清除流体。配置、探针制品及 JFR profile 设置一致；40 ms 操作预算、每 tick 262,144 体素/写入预算、1024 预读上限和 4096 保留区块上限也相同。这是含新地形生成、适用时的空列捷径和真实后处理的完整请求，不是预先生成全部区块后的纯清理测试。
+
+| 本地运行 | 结果 / 完成区块 | 请求至 WRITTEN | 观测 tick | 完成区块 / 观测 tick | 完整 tick P95 / P99 / 最大值 |
+|---|---|---:|---:|---:|---:|
+| `r1024-baseline57-profile01` | WRITTEN / 13,121 | 71.7268 s | 1417 | 9.26 | 48.68 / 95.77 / 992.08 ms |
+| `r1024-candidate59-profile01` | WRITTEN / 13,121 | 64.1069 s | 1284 | 10.22 | 45.80 / 95.64 / 482.53 ms |
+
+两轮结束时加载、光照、保存、发包和保留区块计数均为零；`WRITTEN` 包含真实原生光照及 terrain/POI 持久化屏障。吞吐来自完成确认，不是队列提交或数学计算数量。candidate59 测试包 SHA-256 为 `7aabb1943f373b9ad5646a554722299b42fd1c880a56a8d3e72175109ad2a4c6`；基线包使用上述 batch57。原始 manifest、assessment、逐 tick 遥测、JFR 和进程记录保留于对应 `.local/runs/` 目录。
+
+这一对样本的请求耗时减少约 10.6%，仍不足以证明稳定加速或达到 50/100 区块每 tick 的目标。全 tick 尾延迟仍明显存在。每 tick 末尾观察到的 `POST_PROCESSING_CHUNK` 分别为 629 / 541 次，`LOADING_CHUNK` 均为 544 次；这些是阶段抽样次数，不能当作独占 CPU 时间或精确等待时长。四核利用率在测量区间内的完整 5 秒样本约为 77.9% / 78.7%，也不能据此断言剩余时间全部由磁盘或后处理造成。
+
+两轮均无玩家连接，JFR/遥测开销包含在计时内，不覆盖客户端发包吞吐与渲染。它们验证完整请求到达 WRITTEN，没有新增全体体素几何正确性 oracle；两轮 `visited` 均为 72,635,853，但 `changed` 分别为 21,001,387 / 21,001,487，差异尚未逐格归因，不能宣称世界输出完全相同。启动耗时不计入请求耗时；这是第一次配对测量，没有重复样本或置信区间。
+
+同一 candidate59 的 `entity-api-native04` 在标准原生服务端完成全部实体场景断言（45 个场景 tick），覆盖默认直接移除容器、已保存实体真实卸载/重载、玩家原生死亡、事件拒绝、精确边界和取消。启动时的 `BatchPipelineChecks` 也实际通过：已写 region A 的同步不提前发布无关 region B；等待工作线程同步期间原生邮箱仍可读取；关闭必须等待已接纳的同步完成；原生删除与异步同步交错后不复活已删除偏移，也不损坏邻区块。该探针使用 4 CPU / 4 GiB，并非实体吞吐基准。
+
+`portable-release02` 以 2 CPU、单 Gradle worker 完成算法库 `regression`，退出码为 0，日志包含新 `PreparationWindowTest` 的上游延迟、有界探测、压力与逐帧上限检查，以及既有几何、光照、游标、规划和恢复检查。它不是完整 Forge/宿主回归。以上原生功能检查和算法回归均不能替代其他源码候选的验证。
+
+## Core 命令进度总量检查（2026-10-29）
+
+Core 的 `/gtlregion blast` 增加玩家 BossBar、计时和近期真实完成吞吐；使用方法及跳过、断线、持久化语义见 [Core 对接文档](gtlcore-integration.md#管理员验收入口)。本地 `progress-geometry01` 提取实际进度总量计数源码，与权威 `CenterOutChunkCursor` 做 605 次精确比较，覆盖 R1024、R10000 及取消；单 CPU 运行退出码为 0，日志记录全部通过。该检查验证的是纯几何总量等价性，不是 BossBar 网络、客户端显示或完整宿主运行验证。原始提取源码、哈希、输出和结果保留于 `.local/runs/progress-geometry01/`，不进入发布制品。
+
+## candidate60 结果与 source62 功能、构建验证（2026-10-29）
+
+candidate60 后续完成两种 R1024 场景，均未显示耗时改善。新地形场景沿用前述配置、种子、探针和 JFR 口径；已有地形场景则从同一份停止运行的合成 FULL 存档克隆，13,121 列均带原生后处理，不补生成新列。两种场景仍为 4 CPU、4 GiB、无玩家，不能把两种不同地形的绝对耗时相互当作加速对照。
+
+| 场景 / 本地运行 | 结果 / 完成区块 | 请求耗时 | 观测 tick | 完整 tick P95 / P99 |
+|---|---|---:|---:|---:|
+| 新地形 `r1024-candidate60-profile01` | WRITTEN / 13,121 | 76.9850 s | 1542 | 49.70 / 107.64 ms |
+| 已有 FULL `r1024-existing-baseline57` | WRITTEN_AND_DISK_VERIFIED / 13,121 | 47.9672 s | 962 | 42.88 / 76.83 ms |
+| 已有 FULL `r1024-existing-candidate60` | WRITTEN_AND_DISK_VERIFIED / 13,121 | 49.0120 s | 979 | 47.85 / 98.33 ms |
+
+新地形 candidate60 比 baseline57 的 71.7268 s 和 candidate59 的 64.1069 s 都慢；已有地形 candidate60 比相同夹具基线慢约 2.2%。已有地形两轮均通过 53 列原生磁盘抽样，检查 2,858 个方块，包含 477 个基岩样本、49 个水样本和 1,772 个范围外非空气样本；`changed` 均为 410,624,426。计时包含冷加载、原生后处理和最终持久化确认，不含夹具准备和完成后的抽样回读；合成地形不是玩家世界复现，也不证明边界流体在任务完成后静止。单轮对照保留其局限，没有将后处理阶段观察次数下降等同于整任务提速。
+
+后续 source62 因此收窄了后处理消除资格：预读阶段先检查整个区块的 Palette 是否全部具备静态移除证明，提前保留原生回调余项的后处理路径，避免准备到最后才回退、把邻区块生成与后处理串接到当前提交上。独立的非空气计数改为与原生 `recalcBlockCounts` 共用一次 Palette 遍历，仍调用原生计数消费者，保留含流体方块和随机 tick 计数语义；不再对同一混合存储重复扫描。这些是实现变化，本节不以它们代替 source62 的性能实测。
+
+`postprocessing62-01` 在真实 `ServerLevel` 中只运行六项 `vre_postprocessing_clearance` GameTests，日志确认 **6/6 required tests 通过**，正常退出 0，运行前后源码哈希不变。覆盖取消不消费原生列表、成功提交后消费、未选中/受保护/未知状态及方块实体/升级数据回退、同长度元数据替换、写后元数据改变、保留条目不得授权提交，以及全空气列表仍需最终权限与元数据确认。第六项确认只含邻方块 tick 的升级数据真正经历原生 FULL→BLOCK_TICKING、实际安排 tick，降回 FULL 后不会永久等待；旧的成功 future 也不能确认后来替换的升级数据实例。
+
+首项同时执行 `SectionStatsChecks`，以逐格独立计数、原生网络编码回读和后续状态修改检查共享 recount：独立非空气数准确，原生含流体计数及方块/流体随机 tick 语义保留。该轮限定一个逻辑 CPU、单 Gradle worker，约 228.9 秒包含启动及关闭，不是爆炸吞吐计时，也不是完整 Forge/宿主回归。上述 605 次进度几何对照另行通过，尚不能作为 BossBar 实际联网显示验收。
+
+source62 的正常测试包及嵌入库构建、隔离检查通过，Core 同步了 **137 个源码文件**；`vre-vendor.json` 的整体快照为 `bfcae7de49e47f021cca2e648a9cb60d10df308bde3941f4b20d1643aa23d167`。Core `vre-release13` 因命令源码格式检查失败，`vre-release14` 因新进度类行尾格式检查失败，原始失败记录保留；修正格式后 `vre-release15` 通过构建、`verifyPackagedVre`、Mixin/refmap 和格式检查。版本保持 VRE 0.1.0、Core 1.2.3.3。
+
+| source62 中间候选制品 | SHA-256 |
+|---|---|
+| VRE engine `release-batch62` | `288d536d30cc4d75148a4549f0e3b2d6e2d98cf669c4d79ce6b9fe01b7cc4fdb` |
+| Forge 测试包 `release-batch62` | `ef4ad631e96f79766b5dc097482b48c0ff65e77e478b4af54676fdac53bf7a63` |
+| Core `release15-gtlcore-1.2.3.3.jar` | `961ff1bde1676997705873e27155ec5137cdc9c53fa86bfa0ca997997b029b91` |
+
+Core 制品保留在其工作树 `.local/artifacts/`，构建记录在 `.local/runs/vre-release15/`。release15 对应 source62 中间候选，不是下文 source63 的交付构建；后续性能记录不能套用其他候选的制品哈希。
+
+## source62 完整结果与 source63 适用范围调整（2026-10-29）
+
+source62 的两种 R1024 测量随后完成，沿用各自上述场景和 4 CPU、4 GiB、无玩家的口径。已有 FULL 场景再次通过相同的 53 列、2,858 方块原生磁盘抽样，`changed` 为 410,624,426；新地形场景仍只记录完整完成确认，未新增全几何一致性 oracle。
+
+| 本地运行 | 结果 / 完成区块 | 请求耗时 | 观测 tick | 区块 / 观测 tick | 完整 tick P95 / P99 / 最大值 |
+|---|---|---:|---:|---:|---:|
+| `r1024-candidate62-profile01` | WRITTEN / 13,121 | 73.1800 s | 1441 | 9.11 | 47.18 / 110.02 / 1079.63 ms |
+| `r1024-existing-candidate62` | WRITTEN_AND_DISK_VERIFIED / 13,121 | 52.1860 s | 1047 | 12.53 | 47.35 / 94.01 / 200.54 ms |
+
+新地形相对 baseline57 的 71.7268 s 慢约 2.0%，已有 FULL 相对同夹具 baseline57 的 47.9672 s 慢约 8.8%；两种完整请求都没有显示耗时改善。不能把中间 candidate59 的 64.1069 s 作为 source62 的结果，也不能因个别分位数改善而宣称整体提速。此前功能测试通过仍成立，但不意味着大范围性能目标已达到。
+
+source63 将 `PostProcessingClearance` 的入口限制为 **`generate=false` 请求中已加载到 FULL 的区块**；默认 `generate=true` 的加载/生成订单恢复原生后处理批量预热，不再使用未体现整任务收益的推测消除策略。这里的 `generate=false` 禁止补生成，仍允许引擎从磁盘读取已存在的 FULL 区块，不应误读为只处理命令发出时已经在内存的区块。受限的消除算法及其严格正确性检查保留，独立准备窗口、异步持久化屏障、共享非空气计数、实体 API 和命令进度也保留。
+
+`release-batch63` 构建与制品隔离检查通过，Forge 测试包 SHA-256 为 `aca790940747e9d6376a20165c038a5870c3a4b2f6e3b6f543b842961be8239e`；Core 新同步快照为 `a7ca8b6af0eb0d1c8bb1e2c95369f775e1f4fb643d488469b47986275dd4fce7`。本节写入时尚无 source63 性能结果，Core release16 构建也未在此确认；后续须依据完成记录追加，不能继承 source62 的构建或性能结论。
+
+
+## 交付 source63 / Core release16 的完整 R1024 结果（2026-10-29）
+
+最终交付使用 `release-batch63`，加载/生成请求保留原生批量后处理；已证明会被清空的后处理仅在不补生成的请求中启用。两种测试均使用前述各自固定输入、探针、JFR、4 CPU 和 4 GiB，完整完成 13,121 个区块的光照与持久化确认。
+
+| 场景 | baseline57 | source63 | source63 观测 tick | source63 完整 tick P95 / P99 / 最大 |
+|---|---:|---:|---:|---:|
+| 新地形（含空列捷径） | 71.7268 s | 86.0301 s | 1722 | 48.28 / 90.90 / 177.55 ms |
+| 同一已有 FULL 合成存档 | 47.9672 s | 49.9327 s | 996 | 41.99 / 70.19 / 421.81 ms |
+
+这是各一轮完整计时，不能用来保证每 tick 最低吞吐或宣称全面、稳定提速。新地形仅核验完成，不冒充独立几何 oracle；已有地形的 53 列、2,858 个原生磁盘样本再次通过，覆盖水清理、基岩保留及边界外不修改，没有使用新空列替代已有内容。两组都没有玩家、客户端渲染或整合包网络负载；本轮未达到普遍 50 个已有区块/tick 的验收目标。
+
+最终同步快照 `a7ca8b6af0eb0d1c8bb1e2c95369f775e1f4fb643d488469b47986275dd4fce7`，137 文件，Core `vre-release16` 再次通过编译、嵌入库、Mixin/refmap、格式和 Mixin 包检查。测试包为 `release16-gtlcore-1.2.3.3.jar`，SHA-256 `f6e6de60d74c156e7fe4931bb10cff024aea69c63684b4700746182ca1ab080c`，15,352,444 字节；算法测试适配器 SHA-256 `aca790940747e9d6376a20165c038a5870c3a4b2f6e3b6f543b842961be8239e`。这是嵌入相同算法源码的 Core 制品，未将独立 Forge 的运行结果冒充完整 Core 整合包实测。
+
+Core 命令进度条、墙钟计时和近 5 秒吞吐已随该包提供。source62 的六项原生功能检查及共享 section 计数检查通过，source63 仅继续收窄其策略资格；本轮没有因该条件改变重复整套 GameTest 启动。当时交付未增加版本号、提交或推送。详细原始输入、失败/中间结果和最终结果保存在本地案例 `VRE-20261029-R1024-THROUGHPUT/results-05`，不进入仓库制品。
+
+## source64 / Core release17 的计数注入兼容修正（2026-10-29）
+
+真实客户端随后暴露 release16 与 Radium `0.12.4+git.26c9d8e` 的启动冲突：`SectionStatsMixin.vre$countWithNative` 的 Redirect 必须命中一次，却实际命中零次。根因是 Radium 的 `util.block_tracking.ChunkSectionMixin.initFlagCounters` 已经 Redirect 同一个 `PalettedContainer.count` 调用；不是缺少 VRE 类，也不是整个原生重算方法被覆盖。该 Radium 调用仍执行原生消费者，并更新它自己的状态标记计数；不能靠提高 VRE 优先级抢占调用解决。
+
+source64 将共享遍历改为优先级 900 的可选 Redirect；每次进入 `recalcBlockCounts` 先使独立计数失效，若共享路径没有执行，则在返回时独立统计 Palette。原生及 Radium 消费者保持原状；没有竞争者时仍共享一次遍历。对实际 Radium 制品的字节码检查也确认，其 `PalettedContainer.count` 优化保留消费者回调，兜底可以使用该接口。检查的 Embeddium、ModernFix、FerriteCore 制品未发现相同重算调用的第二个竞争 Redirect；这只是静态检查，不是所有模组版本的兼容承诺。
+
+source64 与 Core `release17-gtlcore-1.2.3.3.jar` 的构建检查通过，Core 制品 SHA-256 为 `a6c86a17e2ec293b9c4adabc0ee79f91b981be796f14d72a5a7aca4d51946027`，15,352,584 字节。随后的 `radium-production01` 使用实际重映射的 source64 制品和相同 Radium 版本，成功加载主世界并正常退出；原生 SectionStatsChecks（包括直接修改 Palette 后将旧计数重算为 37）通过，Radium 的状态跟踪接口保留，添加水、重算、删除水后的 `ANY_FLUID` 标记和 VRE 非空气数量均正确。Core 内嵌与该运行制品的 `SectionStatsMixin.class` SHA-256 相同。
+
+上述检查是两个逻辑 CPU 上的普通 Forge 服务端运行，不是完整玩家整合包客户端实测。未重测 source64 的完整 R1024 吞吐，前节 source63 数字不自动适用于本修正；尤其兼容兜底会增加一次 Palette 遍历。真实玩家客户端画面、完整整合包和所有模组组合仍需分别验证。

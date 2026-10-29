@@ -60,6 +60,7 @@ public final class PaletteBackendGameTests {
 
     @GameTest(template = "empty", batch = "vre_palette_counts", timeoutTicks = 400)
     public static void accurateCounterAndRevisionProtectFastPath(GameTestHelper helper) {
+        org.voxelregion.verification.SectionStatsChecks.verify(helper.getLevel());
         Fixture fixture = fixture(helper, 0);
         var fluids = new LevelChunkSection(new PalettedContainer<>(Block.BLOCK_STATE_REGISTRY,
                 Blocks.WATER.defaultBlockState(), PalettedContainer.Strategy.SECTION_STATES),

@@ -4,13 +4,16 @@ package org.voxelregion.forge;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.storage.IOWorker;
+import net.minecraft.world.level.ChunkPos;
 
 /** Bounded, nonblocking native lighting, terrain and POI persistence barriers. World access stays on the server thread. */
 public final class NativeCommitFences {
@@ -72,7 +75,7 @@ public final class NativeCommitFences {
         refreshBatches();
         List<Request> selected = new ArrayList<>();
         List<CompletableFuture<Void>> writes = new ArrayList<>();
-        Set<IOWorker> workers = new LinkedHashSet<>();
+        Map<IOWorker, Set<ChunkPos>> workers = new LinkedHashMap<>();
         Iterator<Request> iterator = pending.iterator();
         while (iterator.hasNext() && selected.size() < MAX_BATCH && System.nanoTime() < deadline) {
             Request request = iterator.next();
@@ -105,7 +108,8 @@ public final class NativeCommitFences {
                     if (revision(request.chunk) != request.epoch)
                         throw new IllegalStateException("Chunk changed during native serialization; stable terrain/light image cannot be acknowledged");
                     writes.add(capture.writes());
-                    workers.addAll(capture.workers());
+                    capture.positions().forEach((worker, positions) ->
+                            workers.computeIfAbsent(worker, ignored -> new LinkedHashSet<>()).addAll(positions));
                     selected.add(request);
                 }
             } catch (RuntimeException | LinkageError failure) {
@@ -118,9 +122,10 @@ public final class NativeCommitFences {
         if (selected.isEmpty()) return;
         // Capture individual futures before the barrier: synchronize alone can miss an earlier failed store.
         CompletableFuture<Void> completion = CompletableFuture.allOf(writes.toArray(CompletableFuture[]::new))
-                .thenCompose(ignored -> CompletableFuture.allOf(workers.stream()
-                        .map(worker -> worker instanceof NativeAccess.DurableStorage storage
-                                ? storage.vre$flushStored() : worker.synchronize(true)).toArray(CompletableFuture[]::new)));
+                .thenCompose(ignored -> CompletableFuture.allOf(workers.entrySet().stream()
+                        .map(entry -> entry.getKey() instanceof NativeAccess.DurableStorage storage
+                                ? storage.vre$flushStored(entry.getValue()) : entry.getKey().synchronize(true))
+                        .toArray(CompletableFuture[]::new)));
         batches.add(new SaveBatch(List.copyOf(selected), completion));
         refreshBatches();
         // Completion is observed on the server thread on the next tick. No old asynchronous

@@ -55,13 +55,14 @@ final class ForgeOperationRunner {
     private static final Map<UUID, CompletableFuture<GenerationGate.Registration>> GENERATING = new HashMap<>();
     private static final Map<UUID, CompletableFuture<Boolean>> EXISTING = new HashMap<>();
     private static final Map<UUID, ChunkPreparation> PREPARING = new HashMap<>();
+    private static final Map<UUID, org.voxelregion.forge.PostProcessingClearance> DEFERRED_POST_PROCESSING = new HashMap<>();
     private static final int MAX_ENTITY_CANDIDATES = 16_384;
     private static int roundRobin;
     private static boolean executingStep;
     private static final org.voxelregion.runtime.CompletionWindow completionWindow = new org.voxelregion.runtime.CompletionWindow();
     private static int admissionWindow = 128, completedThisFrame;
     static int admissionWindow() { return Math.min(admissionWindow, AdapterConfig.MAX_IN_FLIGHT_CHUNKS.get()); }
-    private static int pendingCommits() {
+    static int pendingCommits() {
         int result = 0;
         for (var queue : IN_FLIGHT.values()) result += queue.size();
         return result;
@@ -574,7 +575,8 @@ final class ForgeOperationRunner {
         }
         ChunkPreparation plan = PREPARING.get(task.id);
         long revision = ChunkMutationTracking.revision(chunk);
-        if (plan == null || plan.chunk != chunk || plan.revision != revision || !plan.borderMatches(level)) {
+        if (plan == null || plan.chunk != chunk || plan.revision != revision || !plan.borderMatches(level)
+                || plan.postProcessing != DEFERRED_POST_PROCESSING.get(task.id)) {
             PREPARING.remove(task.id);
             long preparationBytes = 65_536L * chunk.getSections().length;
             if (preparationBytes + 8L * 1024 + 4096 > AdapterConfig.MAX_PENDING_BYTES.get()) {
@@ -587,7 +589,7 @@ final class ForgeOperationRunner {
                 task.message = "Waiting for complete-chunk preparation memory.";
                 return false;
             }
-            plan = new ChunkPreparation(level, chunk, revision, level.getMinSection());
+            plan = new ChunkPreparation(level, chunk, revision, level.getMinSection(), DEFERRED_POST_PROCESSING.get(task.id));
             PREPARING.put(task.id, plan);
         }
         Explosion context = new Explosion(level, null, task.cx, task.cy, task.cz, task.radius, false, Explosion.BlockInteraction.KEEP);
@@ -620,9 +622,14 @@ final class ForgeOperationRunner {
             if (task.physics == AdapterConfig.Physics.NONE && AdapterConfig.BULK_SECTIONS.get()) {
                 var minimum = new BlockPos(bounds.minX(), bounds.minY(), bounds.minZ());
                 var prepared = PaletteSectionClearBackend.prepareSelected(level, chunk, level.getSectionIndexFromSectionY(sectionY),
-                        selection, state -> !mustKeep(state, level, minimum, context, task.resistance, task.clearFluids, task.destroyBedrock), BULK_HOOKS);
+                        selection, state -> !mustKeep(state, level, minimum, context, task.resistance, task.clearFluids, task.destroyBedrock),
+                        BULK_HOOKS, plan.postProcessing);
                 if (!prepared.accepted()) {
                     PREPARING.remove(task.id);
+                    if (plan.postProcessing != null) {
+                        requireNativePostProcessing(level, task);
+                        return false;
+                    }
                     if (prepared.rejection() == PaletteSectionClearBackend.Rejection.STALE) return true;
                     pause(task, OperationData.State.PAUSED, "Whole-chunk preparation unavailable: " + prepared.rejection());
                     return true;
@@ -646,6 +653,10 @@ final class ForgeOperationRunner {
         task.message = "Preparing complete chunk " + task.chunkX + "," + task.chunkZ + ": "
                 + (plan.nextSection - level.getMinSection()) + "/" + chunk.getSections().length + " sections; terrain unchanged.";
         if (plan.nextSection < level.getMaxSection() || !budget.available()) return true;
+        if (plan.postProcessing != null && (!plan.nativeSections.isEmpty() || !plan.postProcessing.plansEraseAll(plan.sections))) {
+            requireNativePostProcessing(level, task);
+            return false;
+        }
         if (plan.changedBlocks > 0 && RuntimeBridge.availableMetadataBytes(level.getServer())
                 < 65_536L + level.getHeight() * 1792L) {
             task.message = "Waiting for batch-light memory before changing terrain.";
@@ -672,6 +683,7 @@ final class ForgeOperationRunner {
         if (!plan.sections.isEmpty()) {
             var report = PaletteSectionClearBackend.commitBatch(plan.sections,
                     () -> task.active() && committedPlan.borderMatches(level)
+                            && (committedPlan.postProcessing == null || committedPlan.postProcessing.matchesMetadata())
                             && ClaimChecks.check(level, task.chunkX, task.chunkZ, task.protectEveryClaim) == ClaimChecks.Decision.ALLOW,
                     (lightLevel, lightChunk, lightPlans, nativeFallback) -> mutationsFinished.thenCompose(complete ->
                             complete ? org.voxelregion.forge.ClearedChunkLightBatch.afterWholeChunkMutation(
@@ -715,6 +727,21 @@ final class ForgeOperationRunner {
                 }
             }
             clearFallingTerrain(level, task, chunk, volume, context);
+            // Entity-removal observers may cancel after publication. Their cancellation already
+            // owns settlement; preserve it and leave pending native work intact.
+            if (plan.postProcessing != null && !task.active()) return true;
+            if (plan.postProcessing != null && !plan.postProcessing.consumeAfterCommit(() -> task.active()
+                    && committedPlan.borderMatches(level)
+                    && ClaimChecks.check(level, task.chunkX, task.chunkZ, task.protectEveryClaim) == ClaimChecks.Decision.ALLOW)) {
+                // A watcher can introduce new work after palette publication. Preserve it and the
+                // dirty receipt: this is a post-write recovery stop, never an unapplied retry.
+                receipts.afterWrite(task.id, task.phase, level.getMaxSection(), 0);
+                task.needsChunkPacket = true;
+                chunk.setUnsaved(true);
+                pause(task, OperationData.State.PAUSED_RECOVERY,
+                        "Post-processing changed after terrain commit; pending native work retained. Partial chunk requires recovery inspection before replay.");
+                return true;
+            }
             mutationsComplete = true;
         } finally {
             // Protection changes and throwing native callbacks must release the pending
@@ -863,17 +890,20 @@ final class ForgeOperationRunner {
         boolean pending = ChunkReadAhead.pendingPostProcessing(chunk);
         HeldChunk held = HELD.get(task.id);
         if (pending) {
-            PREPARING.remove(task.id);
+            // Never replace/cancel native lifecycle futures. Only a distance-zero lease can
+            // defer provably erased work; a previously requested native lifecycle runs normally.
             if (held.ticketDistance == 0) {
-                // distance 1 requests BLOCK_TICKING and the native 3x3 FULL prerequisites;
-                // prepareTickingChunk runs fluid/shape/BE/upgrade post-processing on its owner thread.
-                level.getChunkSource().addRegionTicket(TICKET, held.position, 1, task.id);
-                level.getChunkSource().removeRegionTicket(TICKET, held.position, 0, task.id);
-                HELD.put(task.id, new HeldChunk(level, held.position, 1));
+                var proof = DEFERRED_POST_PROCESSING.get(task.id);
+                if (proof == null || !proof.currentRevision(level, chunk)) {
+                    proof = postProcessingClearance(level, task, chunk);
+                    if (proof != null) DEFERRED_POST_PROCESSING.put(task.id, proof);
+                }
+                if (proof != null) return true;
             }
-            task.message = "Waiting for native generation post-processing before preparing the complete chunk.";
+            requireNativePostProcessing(level, task);
             return false;
         }
+        DEFERRED_POST_PROCESSING.remove(task.id);
         if (held.ticketDistance != 0) {
             if (!((org.voxelregion.forge.GenerationBridge) level.getChunkSource().chunkMap).vre$postProcessingReady(chunk)) {
                 task.message = "Waiting for native generation post-processing completion.";
@@ -884,6 +914,39 @@ final class ForgeOperationRunner {
             HELD.put(task.id, new HeldChunk(level, held.position, 0));
         }
         return true;
+    }
+
+    /** Bounded pure qualification, also used speculatively by read-ahead; submission always rechecks. */
+    static org.voxelregion.forge.PostProcessingClearance postProcessingClearance(ServerLevel level,
+            OperationData.Task task, LevelChunk chunk) {
+        // Keep native neighbor preparation batched for disk-loading/generating requests.
+        // Full R1024 measurements found that speculative deferral reduced post-list work
+        // but delayed upstream readiness and did not improve end-to-end completion.
+        // A loaded-only request can still erase its proven pending work without requiring
+        // the native 3x3 promotion of additional terrain.
+        if (!task.active() || task.generate || !task.wholeChunk || task.physics != AdapterConfig.Physics.NONE || !task.clearFluids
+                || task.propagation != FrozenOcclusion.Mode.NONE || !AdapterConfig.BULK_SECTIONS.get()
+                || !BULK_HOOKS.supportsBulk(level)
+                || ClaimChecks.check(level, chunk.getPos().x, chunk.getPos().z, task.protectEveryClaim) != ClaimChecks.Decision.ALLOW)
+            return null;
+        Explosion context = new Explosion(level, null, task.cx, task.cy, task.cz, task.radius, false, Explosion.BlockInteraction.KEEP);
+        Volume selected = task.phaseVolume(level.getMinBuildHeight(), level.getMaxBuildHeight());
+        return org.voxelregion.forge.PostProcessingClearance.capture(level, chunk, (pos, state) ->
+                selected.contains(pos.getX(), pos.getY(), pos.getZ()) && level.getWorldBorder().isWithinBounds(pos)
+                        && !mustKeep(state, level, pos, context, task.resistance, task.clearFluids, task.destroyBedrock));
+    }
+
+    private static void requireNativePostProcessing(ServerLevel level, OperationData.Task task) {
+        PREPARING.remove(task.id);
+        DEFERRED_POST_PROCESSING.remove(task.id);
+        HeldChunk held = HELD.get(task.id);
+        if (held.ticketDistance == 0) {
+            // The real BLOCK_TICKING future owns fluid/shape/BE/upgrade work and 3x3 prerequisites.
+            level.getChunkSource().addRegionTicket(TICKET, held.position, 1, task.id);
+            level.getChunkSource().removeRegionTicket(TICKET, held.position, 0, task.id);
+            HELD.put(task.id, new HeldChunk(level, held.position, 1));
+        }
+        task.message = "Waiting for native generation post-processing before preparing the complete chunk.";
     }
 
     private static void finishChunk(ServerLevel level, OperationData.Task task) {
@@ -947,6 +1010,7 @@ final class ForgeOperationRunner {
 
     private static void settlePartial(OperationData.Task task) {
         PREPARING.remove(task.id);
+        DEFERRED_POST_PROCESSING.remove(task.id);
         HeldChunk held = HELD.get(task.id);
         if (held == null) { releaseTicket(task.id); return; }
         LevelChunk chunk = held.level.getChunkSource().getChunkNow(held.position.x, held.position.z);
@@ -1043,6 +1107,7 @@ final class ForgeOperationRunner {
                 + org.voxelregion.forge.ParallelChunkCompression.estimatedBytes()
                 + org.voxelregion.forge.ClearedGeneration.estimatedPendingBytes()
                 + org.voxelregion.forge.ClearedChunkLightBatch.estimatedPendingBytes();
+        for (var proof : DEFERRED_POST_PROCESSING.values()) bytes += proof.estimatedBytes();
         for (var level : server.getAllLevels()) for (var task : OperationData.get(level).tasks) {
             bytes += 4096L + 24L * task.excludedChunks.size(); // Cursor, current masks and bounded per-task bookkeeping.
             if (task.centerCursor != null) bytes += task.centerCursor.estimatedBytes();
@@ -1134,6 +1199,7 @@ final class ForgeOperationRunner {
 
     private static void releaseTicket(UUID id) {
         PREPARING.remove(id);
+        DEFERRED_POST_PROCESSING.remove(id);
         EXISTING.remove(id);
         var generation = GENERATING.remove(id);
         if (generation != null) generation.thenAccept(GenerationGate.Registration::close);
@@ -1160,7 +1226,7 @@ final class ForgeOperationRunner {
         // Stop is not a durable acknowledgement: retain each task's nonzero persisted uncertainty marker.
         for (var entry : IN_FLIGHT.entrySet()) for (var commit : entry.getValue())
             commit.held.level.getChunkSource().removeRegionTicket(TICKET, commit.held.position, commit.held.ticketDistance, entry.getKey());
-        IN_FLIGHT.clear(); RESERVED.clear(); PREPARING.clear(); EXISTING.clear();
+        IN_FLIGHT.clear(); RESERVED.clear(); PREPARING.clear(); DEFERRED_POST_PROCESSING.clear(); EXISTING.clear();
         ENTITIES.clear(); OperationOcclusion.stop(); roundRobin = 0;
     }
     private record Work(ServerLevel level, OperationData data, OperationData.Task task) {}
@@ -1168,13 +1234,16 @@ final class ForgeOperationRunner {
     private static final class ChunkPreparation {
         final LevelChunk chunk;
         final long revision;
+        final org.voxelregion.forge.PostProcessingClearance postProcessing;
         final List<PaletteSectionClearBackend.Prepared> sections = new ArrayList<>();
         final List<NativeSection> nativeSections = new ArrayList<>();
         int nextSection, changedBlocks, keptBlocks;
         long visited;
         final double borderMinX, borderMaxX, borderMinZ, borderMaxZ;
-        ChunkPreparation(ServerLevel level, LevelChunk chunk, long revision, int nextSection) {
+        ChunkPreparation(ServerLevel level, LevelChunk chunk, long revision, int nextSection,
+                org.voxelregion.forge.PostProcessingClearance postProcessing) {
             this.chunk = chunk; this.revision = revision; this.nextSection = nextSection;
+            this.postProcessing = postProcessing;
             var border = level.getWorldBorder();
             borderMinX = border.getMinX(); borderMaxX = border.getMaxX();
             borderMinZ = border.getMinZ(); borderMaxZ = border.getMaxZ();

@@ -13,6 +13,7 @@ public final class AllTests {
         ClearedChunkLightingTest.main(args);
         OpenRegionLightingTest.main(args);
         CompletionWindowTest.main(args);
+        PreparationWindowTest.main(args);
         ColumnNearestIndexTest.main(args);
         PlannerTest.main(args);
         RuntimeTest.main(args);

@@ -4,12 +4,16 @@ package org.voxelregion.verification;
 import org.voxelregion.forge.NativeAccess;
 import org.voxelregion.forge.NativePaletteImage;
 import org.voxelregion.forge.ParallelChunkCompression;
+import org.voxelregion.forge.ParallelRegionStores;
 
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import net.minecraft.nbt.*;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.Block;
@@ -26,6 +30,7 @@ public final class BatchPipelineChecks {
         palettes();
         deferredHeader(root.resolve("header"));
         parallelStores(root.resolve("parallel"));
+        verifyDurableFences(root.resolve("durable-fences"));
     }
     private static void palettes() {
         var values = new ArrayList<BlockState>();
@@ -96,6 +101,94 @@ public final class BatchPipelineChecks {
             }
             var deleted = new ChunkPos(0, 0); worker.store(deleted, null).join();
             check(worker.loadAsync(deleted).join().isEmpty(), "Deletion after a parallel store must remain ordered");
+        }
+    }
+    /** Real native mailbox, region headers and close path; all waits have a small wall-clock bound. */
+    public static void verifyDurableFences(Path directory) throws Exception {
+        Files.createDirectories(directory);
+        var a = new ChunkPos(0, 0); var a2 = new ChunkPos(1, 0); var b = new ChunkPos(32, 0);
+        var worker = new Worker(directory);
+        CountDownLatch release = new CountDownLatch(1);
+        CompletableFuture<Void> close = null;
+        try {
+            for (var position : List.of(a, a2, b)) worker.store(position, tag(position.x, 0)).get(10, TimeUnit.SECONDS);
+            worker.synchronize(true).get(10, TimeUnit.SECONDS);
+            for (var position : List.of(a, a2, b)) {
+                var data = tag(position.x, 1);
+                ParallelChunkCompression.prepare(data, 8L * 1024 * 1024);
+                worker.store(position, data).get(10, TimeUnit.SECONDS);
+            }
+            ((NativeAccess.DurableStorage) (Object) worker).vre$flushStored(List.of(a, a2)).get(10, TimeUnit.SECONDS);
+            check(diskRound(directory, a) == 1 && diskRound(directory, a2) == 1,
+                    "A touched-region force must durably include all its preceding stores");
+            check(diskRound(directory, b) == 0,
+                    "A force of region A must not force untouched buffered region B");
+
+            // Hold only detached IO workers, never the native mailbox or a RegionFile lock.
+            // A native load must still pass while the accepted force waits for a worker.
+            var poolField = ParallelRegionStores.class.getDeclaredField("workers"); poolField.setAccessible(true);
+            var pool = (ThreadPoolExecutor) poolField.get(null);
+            var occupied = new CountDownLatch(pool.getCorePoolSize());
+            for (int i = 0; i < pool.getCorePoolSize(); i++) pool.execute(() -> {
+                occupied.countDown();
+                try { release.await(10, TimeUnit.SECONDS); }
+                catch (InterruptedException error) { Thread.currentThread().interrupt(); }
+            });
+            check(occupied.await(5, TimeUnit.SECONDS), "Detached force workers reached fixture gate");
+            var fence = ((NativeAccess.DurableStorage) (Object) worker).vre$flushStored(List.of(b));
+            check(worker.loadAsync(a).get(3, TimeUnit.SECONDS).orElseThrow().getInt("round") == 1,
+                    "An unfinished force must not block unrelated native mailbox reads");
+            check(!fence.isDone(), "Durability acknowledgement must wait for the actual file force");
+            close = CompletableFuture.runAsync(() -> {
+                try { worker.close(); } catch (java.io.IOException error) { throw new java.util.concurrent.CompletionException(error); }
+            });
+            var closedField = Arrays.stream(IOWorker.class.getDeclaredFields())
+                    .filter(field -> field.getType() == java.util.concurrent.atomic.AtomicBoolean.class).findFirst().orElseThrow();
+            closedField.setAccessible(true);
+            var shuttingDown = (java.util.concurrent.atomic.AtomicBoolean) closedField.get(worker);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+            while (!shuttingDown.get() && System.nanoTime() < deadline) Thread.sleep(1);
+            check(shuttingDown.get() && !close.isDone(), "Close must retain its mailbox until an accepted force settles");
+            release.countDown();
+            close.get(10, TimeUnit.SECONDS); fence.get(10, TimeUnit.SECONDS);
+            check(diskRound(directory, b) == 1, "Close cannot acknowledge before the force reaches the region header");
+        } finally {
+            release.countDown();
+            if (close == null) worker.close(); else close.get(10, TimeUnit.SECONDS);
+        }
+        verifyDeleteForceOrdering(directory.resolve("delete-force"));
+    }
+    private static void verifyDeleteForceOrdering(Path directory) throws Exception {
+        Files.createDirectories(directory);
+        var deleted = new ChunkPos(0, 0); var retained = new ChunkPos(1, 0);
+        try (var worker = new Worker(directory)) {
+            worker.store(retained, tag(retained.x, 42)).get(10, TimeUnit.SECONDS);
+            for (int round = 0; round < 8; round++) {
+                var data = tag(deleted.x, round);
+                ParallelChunkCompression.prepare(data, 8L * 1024 * 1024);
+                worker.store(deleted, data).get(10, TimeUnit.SECONDS);
+                // The completed store releases its write lane. This null store follows
+                // the native no-lane clear path while an independent force is in flight.
+                var force = ((NativeAccess.DurableStorage) (Object) worker).vre$flushStored(List.of(deleted));
+                var removed = worker.store(deleted, null);
+                CompletableFuture.allOf(force, removed).get(10, TimeUnit.SECONDS);
+                ((NativeAccess.DurableStorage) (Object) worker).vre$flushStored(List.of(deleted)).get(10, TimeUnit.SECONDS);
+                try (var disk = new RegionFile(directory.resolve("r.0.0.mca"), directory, true)) {
+                    check(disk.getChunkDataInputStream(deleted) == null,
+                            "Concurrent force/delete must not republish a removed region offset");
+                    try (var input = disk.getChunkDataInputStream(retained)) {
+                        check(input != null && NbtIo.read(input).getInt("round") == 42,
+                                "Concurrent force/delete must retain the neighboring chunk header and sectors");
+                    }
+                }
+            }
+        }
+    }
+    private static int diskRound(Path directory, ChunkPos position) throws Exception {
+        try (var disk = new RegionFile(directory.resolve("r." + position.getRegionX() + "." + position.getRegionZ() + ".mca"), directory, true);
+             var input = disk.getChunkDataInputStream(position)) {
+            check(input != null, "Expected an existing durable chunk payload");
+            return NbtIo.read(input).getInt("round");
         }
     }
     private static ByteBuffer compressed(CompoundTag data) throws Exception {

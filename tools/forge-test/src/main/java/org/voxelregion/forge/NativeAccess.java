@@ -18,7 +18,7 @@ public final class NativeAccess {
     }
     public interface DurableStorage {
         /** Caller has awaited its actual stores; force those bytes without depending on later stores. */
-        CompletableFuture<Void> vre$flushStored();
+        CompletableFuture<Void> vre$flushStored(java.util.Collection<ChunkPos> positions);
     }
     public interface ClimateParameters {
         net.minecraft.world.level.biome.Climate.ParameterList<net.minecraft.core.Holder<net.minecraft.world.level.biome.Biome>> vre$climateParameters();
@@ -43,6 +43,10 @@ public final class NativeAccess {
     /** A negative revision means mutation provenance is unavailable and cannot prove a stable image. */
     public interface ChunkRevision {
         long vre$mutationRevision();
+    }
+    /** Identity actually processed by a successful native LevelChunk.postProcessGeneration call. */
+    public interface ChunkPostProcessing {
+        boolean vre$completedUpgrade(net.minecraft.world.level.chunk.UpgradeData upgrade);
     }
     /** Persisted proof that terrain/biomes were materialized by the cleared-terrain algorithm. */
     public interface ClearedTerrain {
