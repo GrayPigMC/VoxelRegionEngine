@@ -9,6 +9,11 @@ public final class AllTests {
         AdvancedOcclusionTest.main(args);
         AdjacentShadowTest.main(args);
         CursorCheckpointTest.main(args);
+        CenterOutChunkCursorTest.main(args);
+        ClearedChunkLightingTest.main(args);
+        OpenRegionLightingTest.main(args);
+        CompletionWindowTest.main(args);
+        ColumnNearestIndexTest.main(args);
         PlannerTest.main(args);
         RuntimeTest.main(args);
     }

@@ -17,10 +17,12 @@ public final class ChunkPacketQueue {
         final LevelChunk chunk;
         final CompletableFuture<Void> result = new CompletableFuture<>();
         CompletableFuture<Void> light;
+        boolean waitingPrerequisite;
         long epoch;
-        Request(ServerLevel level, LevelChunk chunk) {
+        Request(ServerLevel level, LevelChunk chunk, CompletableFuture<Void> prerequisite) {
             this.level = level; this.chunk = chunk;
-            awaitCurrentLight();
+            if (prerequisite.isDone()) { prerequisite.join(); awaitCurrentLight(); }
+            else { light = prerequisite; waitingPrerequisite = true; }
         }
         void awaitCurrentLight() {
             epoch = NativeCommitFences.revision(chunk);
@@ -30,9 +32,13 @@ public final class ChunkPacketQueue {
     private static final ArrayDeque<Request> pending = new ArrayDeque<>();
     private static long debt, sentBytes;
     public static CompletableFuture<Void> enqueue(ServerLevel level, LevelChunk chunk) {
+        return enqueue(level, chunk, CompletableFuture.completedFuture(null));
+    }
+    /** Publish only after custom light data and its native boundary reconciliation are complete. */
+    public static CompletableFuture<Void> enqueue(ServerLevel level, LevelChunk chunk, CompletableFuture<Void> prerequisite) {
         if (!level.getServer().isSameThread()) throw new IllegalStateException("Packet queue requires server thread");
-        if (pending.size() >= 32) throw new IllegalStateException("Chunk packet queue capacity reached");
-        var request = new Request(level, chunk);
+        if (pending.size() >= 4096) throw new IllegalStateException("Chunk packet queue capacity reached");
+        var request = new Request(level, chunk, prerequisite);
         pending.add(request);
         return request.result;
     }
@@ -49,6 +55,11 @@ public final class ChunkPacketQueue {
             if (!r.light.isDone()) continue;
             try {
                 r.light.join();
+                if (r.waitingPrerequisite) {
+                    r.waitingPrerequisite = false;
+                    r.awaitCurrentLight();
+                    continue;
+                }
                 if (r.level.getChunkSource().getChunkNow(r.chunk.getPos().x, r.chunk.getPos().z) != r.chunk)
                     throw new IllegalStateException("Chunk ticket was released before its packet fence");
                 if (NativeCommitFences.revision(r.chunk) != r.epoch) {
@@ -58,6 +69,8 @@ public final class ChunkPacketQueue {
                 var players = r.level.getChunkSource().chunkMap.getPlayers(r.chunk.getPos(), false);
                 if (!players.isEmpty()) {
                     var packet = new ClientboundLevelChunkWithLightPacket(r.chunk, r.level.getChunkSource().getLightEngine(), null, null);
+                    CompleteChunkLightPacket.fillMissing(packet.getLightData(), r.level.getChunkSource().getLightEngine(),
+                            r.chunk.getPos(), r.level.dimensionType().hasSkyLight());
                     var buffer = new FriendlyByteBuf(Unpooled.buffer());
                     long bytes;
                     try { packet.write(buffer); bytes = (long) buffer.readableBytes() * players.size(); }

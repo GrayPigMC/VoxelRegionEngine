@@ -28,8 +28,8 @@ public final class FacadeGameTests {
         helper.assertTrue(ForgeRegionEngine.control(level, handle.id(), ForgeRegionEngine.Control.CANCEL).applied(), "Cancellation is applied once");
         helper.assertTrue(!ForgeRegionEngine.control(level, handle.id(), ForgeRegionEngine.Control.RESUME).applied(), "Terminal work cannot resume");
         helper.assertTrue(!ForgeRegionEngine.control(level, UUID.randomUUID(), ForgeRegionEngine.Control.CANCEL).applied(), "Unknown ids do not mutate other tasks");
-        helper.assertTrue(ForgeRegionEngine.Options.DEFAULT.clearFluids() && !ForgeRegionEngine.Options.DEFAULT.generateMissingChunks(),
-                "Public defaults retain clearFluids=true and loaded-only execution");
+        helper.assertTrue(ForgeRegionEngine.Options.DEFAULT.clearFluids() && ForgeRegionEngine.Options.DEFAULT.generateMissingChunks(),
+                "Public defaults enable fluid clearing and bounded generation of the complete request");
         helper.succeed();
     }
 }

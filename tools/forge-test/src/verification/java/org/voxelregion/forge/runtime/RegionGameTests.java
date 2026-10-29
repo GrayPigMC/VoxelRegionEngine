@@ -5,18 +5,24 @@ import java.io.IOException;
 import org.voxelregion.testmod.VoxelRegionTestMod;
 import org.voxelregion.testmod.RegionChargeItem;
 import java.util.UUID;
+import java.util.Comparator;
 import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.registries.Registries;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtIo;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.TicketType;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.LiquidBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
@@ -32,17 +38,19 @@ import net.minecraftforge.registries.ForgeRegistries;
 @GameTestHolder(RuntimeBridge.PERSISTENCE_NAMESPACE)
 @PrefixGameTestTemplate(false)
 public final class RegionGameTests {
-    @GameTest(template = "empty", batch = "vre_fluids_default", timeoutTicks = 400)
+    private static final TicketType<UUID> NATIVE_FIXTURE_HOLD = TicketType.create(
+            "vre_native_identity_fixture", Comparator.<UUID>naturalOrder());
+    @GameTest(template = "empty", batch = "vre_fluids_default", timeoutTicks = 100000)
     public static void defaultPolicyClearsFluids(GameTestHelper helper) throws IOException {
         fluidCase(helper, AdapterConfig.RESISTANCE_LIMIT.get(), true);
     }
 
-    @GameTest(template = "empty", batch = "vre_fluids", timeoutTicks = 400)
+    @GameTest(template = "empty", batch = "vre_fluids", timeoutTicks = 100000)
     public static void freeLiquidsAndWaterloggedSolidsClear(GameTestHelper helper) throws IOException {
         fluidCase(helper, 100.0, true);
     }
 
-    @GameTest(template = "empty", batch = "vre_fluids_preserved", timeoutTicks = 400)
+    @GameTest(template = "empty", batch = "vre_fluids_preserved", timeoutTicks = 100000)
     public static void disabledFluidClearingRetainsLiquids(GameTestHelper helper) throws IOException {
         fluidCase(helper, 100.0, false);
     }
@@ -113,8 +121,13 @@ public final class RegionGameTests {
         helper.assertTrue(ForgeOperationRunner.status(task).getString().contains("clearFluids=" + clearFluids),
                 "Operation status exposes fluid policy");
         List<BlockPos> cleared = List.of(waterSource, flowingWater, lavaSource, flowingLava, waterloggedSlab);
-        helper.startSequence().thenWaitUntil(() -> helper.assertTrue(task.state == OperationData.State.WRITTEN,
-                "Fluid operation finishes: " + task.state + ": " + task.message)).thenExecute(() -> {
+        long started = System.nanoTime();
+        helper.startSequence().thenWaitUntil(() -> {
+            String status = ForgeOperationRunner.status(task).getString() + " " + ForgeOperationRunner.progress(task);
+            if (task.state == OperationData.State.FAILED || System.nanoTime() - started > 20_000_000_000L)
+                helper.fail("Fluid operation failed or exceeded 20 seconds of native completion time: " + status);
+            helper.assertTrue(task.state == OperationData.State.WRITTEN, "Fluid operation finishes: " + status);
+        }).thenExecute(() -> {
             if (clearFluids) {
                 for (BlockPos position : cleared) {
                     helper.assertTrue(level.getBlockState(position).isAir(), "Fluid/host cleared to air at " + position);
@@ -165,10 +178,23 @@ public final class RegionGameTests {
         }).thenSucceed();
     }
 
-    @GameTest(template = "empty", batch = "vre_native", timeoutTicks = 400)
+    @GameTest(template = "empty", batch = "vre_native", timeoutTicks = 100000)
     public static void sphereProtectionAndNativeCleanup(GameTestHelper helper) throws IOException {
-        var level = helper.getLevel();
+        // The whole-column oracle needs a world without unrelated aquifer flow into
+        // its cleared shaft. Adding tests moves GameTest templates across natural
+        // terrain; that must not change this deterministic native-write fixture.
+        var level = helper.getLevel().getServer().getLevel(ResourceKey.create(Registries.DIMENSION,
+                new ResourceLocation(RuntimeBridge.PERSISTENCE_NAMESPACE, "generation_backend_fixture")));
+        helper.assertTrue(level != null, "Dedicated native-cleanup fixture dimension exists");
         BlockPos center = helper.absolutePos(new BlockPos(7, 6, 7));
+        ChunkPos fixtureChunk = new ChunkPos(center);
+        UUID fixtureHolder = UUID.randomUUID();
+        OperationData.Task[] fixtureTask = new OperationData.Task[1];
+        level.getChunkSource().addRegionTicket(NATIVE_FIXTURE_HOLD, fixtureChunk, 0, fixtureHolder);
+        WholeChunkRunnerGameTests.onCompletion(helper, () -> {
+            if (fixtureTask[0] != null && !fixtureTask[0].terminal()) ForgeOperationRunner.cancel(fixtureTask[0]);
+            level.getChunkSource().removeRegionTicket(NATIVE_FIXTURE_HOLD, fixtureChunk, 0, fixtureHolder);
+        });
         RuntimeBridge.LOGGER.info("Heightmap fixture before isolation: center={}, {}", center, columnDescription(level, center));
         // A GameTest structure only bounds its template; generated terrain above it is
         // not necessarily empty. Isolate the complete assertion column using native writes.
@@ -193,8 +219,14 @@ public final class RegionGameTests {
         helper.assertTrue(level.getHeight(Heightmap.Types.WORLD_SURFACE, center.getX(), center.getZ()) == center.getY() + 4,
                 "Initial native heightmap matches fixture stone top: " + columnDescription(level, center));
         var task = ForgeOperationRunner.submit(level, UUID.randomUUID(), center, 3, 0, false);
-        helper.startSequence().thenWaitUntil(() -> helper.assertTrue(task.state == OperationData.State.WRITTEN,
-                "Operation finishes native writes: " + task.state + ": " + task.message)).thenExecute(() -> {
+        fixtureTask[0] = task;
+        long started = System.nanoTime();
+        helper.startSequence().thenWaitUntil(() -> {
+            if (task.state == OperationData.State.FAILED || System.nanoTime() - started > 20_000_000_000L)
+                helper.fail("Native operation failed or exceeded 20 seconds: " + task.state + ": " + task.message);
+            helper.assertTrue(task.state == OperationData.State.WRITTEN,
+                    "Operation finishes native writes: " + task.state + ": " + task.message);
+        }).thenExecute(() -> {
             for (int x = -3; x <= 3; x++) for (int y = -3; y <= 3; y++) for (int z = -3; z <= 3; z++) {
                 BlockPos pos = center.offset(x, y, z);
                 if (pos.equals(center) || pos.equals(gateway)) continue;

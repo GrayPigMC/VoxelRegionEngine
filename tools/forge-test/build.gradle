@@ -38,7 +38,6 @@ dependencies {
     // Loom's development Forge launch builds a separate legacy runtime classpath.
     // Include the portable library there as well as in the production nested jar.
     forgeRuntimeLibrary project(':engine')
-    include project(':engine')
 }
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
@@ -66,6 +65,7 @@ jar {
     exclude '**/*GameTests*', '**/ProbeBlocks*'
     exclude 'data/voxelregion_test/structures/empty.nbt'
     exclude 'data/voxelregion_test/dimension/generation_*.json'
+    exclude 'data/voxelregion_test/loot_tables/chests/verification_counted_container.json'
 }
 
 def adapterDevelopmentJar = tasks.register('adapterDevelopmentJar', Jar) {
@@ -95,8 +95,17 @@ def remappedAdapter = tasks.register('adapterJar', net.fabricmc.loom.task.RemapJ
     addNestedDependencies = false
 }
 
+evaluationDependsOn(':engine')
 tasks.named('remapJar', net.fabricmc.loom.task.RemapJarTask) {
-    dependsOn remappedAdapter
+    dependsOn remappedAdapter, project(':engine').tasks.named('jar')
+    def engineJar = project(':engine').tasks.named('jar', Jar).flatMap { it.archiveFile }
+    forgeNestedJars.add(engineJar.map { file ->
+        new net.fabricmc.loom.build.nesting.IncludedJarFactory.NestedFile(
+                new net.fabricmc.loom.build.nesting.IncludedJarFactory.Metadata(
+                        project.group.toString(), 'voxel-region-engine', project.version.toString(), null),
+                file.asFile)
+    })
+    nestedJars.from(engineJar)
     forgeNestedJars.add(remappedAdapter.flatMap { it.archiveFile }.map { file ->
         new net.fabricmc.loom.build.nesting.IncludedJarFactory.NestedFile(
                 new net.fabricmc.loom.build.nesting.IncludedJarFactory.Metadata(

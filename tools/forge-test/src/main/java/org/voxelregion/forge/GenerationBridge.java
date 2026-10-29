@@ -7,4 +7,6 @@ import java.util.concurrent.Executor;
 public interface GenerationBridge {
     boolean vre$generationBusy(long position);
     Executor vre$generationExecutor();
+    /** Nonblocking owner-thread check; propagates an exceptional native post-processing future. */
+    boolean vre$postProcessingReady(net.minecraft.world.level.chunk.LevelChunk chunk);
 }

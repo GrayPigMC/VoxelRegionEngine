@@ -56,7 +56,7 @@ public final class PipelineFailureGameTests {
         try {
             AdapterConfig.PROGRESSION.set(AdapterConfig.Progression.CENTER_OUT);
             AdapterConfig.PROPAGATION.set(FrozenOcclusion.Mode.NONE); AdapterConfig.ENTITY_DAMAGE.set(0.0);
-            task = ForgeOperationRunner.submit(level, UUID.randomUUID(), center, 32, 0, false);
+            task = LegacyShellFixtureGameTests.submit(level, UUID.randomUUID(), center, 32, 0, false);
         } finally {
             AdapterConfig.PROGRESSION.set(progression); AdapterConfig.PROPAGATION.set(propagation);
             AdapterConfig.ENTITY_DAMAGE.set(damage);
@@ -89,9 +89,9 @@ public final class PipelineFailureGameTests {
                 .thenExecute(() -> helper.assertTrue(task.state == OperationData.State.FAILED && task.unconfirmedFences == 1
                                 && task.changed == 1 && !delayedBackendLight.isDone(),
                         "The terminal failure is visible without waiting for the unrelated delayed light stage"))
-                .thenWaitUntil(() -> helper.assertTrue(NativeCommitFences.pendingCount() == 0,
-                        "Native test storage request itself has drained before releasing the artificial backend delay"))
                 .thenExecute(() -> delayedBackendLight.complete(null))
+                .thenWaitUntil(() -> helper.assertTrue(NativeCommitFences.pendingCount() == 0,
+                        "Native storage request drains after its actual backend lighting prerequisite is released"))
                 .thenWaitUntil(() -> helper.assertTrue(task.unconfirmedFences == 0, "Every stage terminates before ticket release"))
                 .thenExecute(() -> {
                     helper.assertTrue(task.state == OperationData.State.FAILED && ForgeOperationRunner.progress(task).retainedChunks() == 0,

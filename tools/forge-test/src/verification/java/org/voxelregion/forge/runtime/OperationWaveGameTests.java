@@ -178,7 +178,7 @@ public final class OperationWaveGameTests {
             AdapterConfig.SHELL_WIDTH.set(2);
             AdapterConfig.PHYSICS.set(AdapterConfig.Physics.NONE);
             AdapterConfig.ENTITY_DAMAGE.set(0.0);
-            OperationData.Task task = ForgeOperationRunner.submit(level, UUID.randomUUID(), center, 7, 0, false);
+            OperationData.Task task = LegacyShellFixtureGameTests.submit(level, UUID.randomUUID(), center, 7, 0, false);
             Fixture fixture = new Fixture(level, chunk, ticket, center, far, outside, task);
             cleanupOnCompletion(helper, fixture);
             MinecraftForge.EVENT_BUS.register(fixture.gate);

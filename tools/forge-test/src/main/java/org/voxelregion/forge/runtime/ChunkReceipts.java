@@ -33,6 +33,7 @@ final class ChunkReceipts implements ICapabilitySerializable<CompoundTag> {
     private ChunkReceipts(LevelChunk owner) { this.owner = owner; }
 
     static void attach(AttachCapabilitiesEvent<LevelChunk> event) {
+        if (!(event.getObject().getLevel() instanceof net.minecraft.server.level.ServerLevel)) return;
         ChunkReceipts data = new ChunkReceipts(event.getObject());
         event.addCapability(new ResourceLocation(RuntimeBridge.PERSISTENCE_NAMESPACE, "receipts"), data);
         event.addListener(data.self::invalidate);

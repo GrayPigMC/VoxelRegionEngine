@@ -144,3 +144,21 @@ FrozenOcclusion refined = FrozenOcclusion.raycastRefined(center, volume.bounds()
 ```
 
 尚未取得快照、保存结果不明、规则版本改变，都不是“成功”。宿主应在状态/UI 中分别显示规划、加载、写入、收尾和暂停原因。
+
+## 8. 中心优先的区块游标
+
+`new CenterOutChunkCursor(volume, center, minY, maxY)` 流式返回与几何相交的区块，按中心到水平区块包围盒的最小距离排列；平局时中心所在区块优先，再按 X/Z 确定排序。每个区块最多返回一次。内存与包围盒较短一轴的区块数成正比，不与全部面积成正比。可传 `maxFrontierRows` 限制队列大小。
+
+`checkpoint()` 保存最后返回项与几何边界，`restore(...)` 用相同体积、中心和高度恢复；`hasNext()` 的预取不推进持久游标。完成某个区块的原生操作仍需要单独回执，游标不是世界写入成功证明。
+
+## 9. 清理后区块的独立光照求解
+
+`ClearedChunkLighting.Snapshot` 接受高为 16 的整数倍的 16×16 列，内容只能是空气或不透明、不发光的保留格。`opaque` 使用 `x | z<<4 | y<<8`；六面顺序由 `Face` 枚举规定，面数组长度用 `faceSize(height, face)` 获取。输入包含真实邻格的方块光/天空光、可通光边界掩码及有独立证据的直射天空列。仅有亮度 15 不能充当直射天空证明。
+
+输入会复制为不可变数据。`new Session(snapshot, maxWorkingBytes)` 后调用 `step(maxWork)` 可分段求解；完成后用 `result()` 读取亮度或每段的 packed nibble 数组。`solve(snapshot)` 是一次完成的便捷接口，纯计算可在宿主允许的工作线程运行。对均匀全空气结果无需分配每格光照数组。
+
+这是固定边界问题的求解器，不证明外部世界已收敛。宿主必须复查地形和边界版本，通过合法原生接口安装结果，再处理外边界传播。Forge 的 `ClearedChunkLightBatch.STRATEGY` 实现该接入，不能单独将求解结果当作保存/网络发布许可。流体、透明形状、保留发光源等不满足证明域的内容使用原生光照。
+
+## Column nearest search
+
+`org.voxelregion.search.ColumnNearestIndex<T>` compiles axis-aligned parameter intervals into a query with fixed leading coordinates and a varying final coordinate. `column(fixedCoordinates).unique(variableCoordinate)` returns the unique nearest value, or `null` when different values tie. Arithmetic overflow is explicit. The Forge exact-biome path falls back to native tie handling. This utility has no Minecraft/world dependency and does not approximate parameter distances.

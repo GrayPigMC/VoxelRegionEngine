@@ -14,7 +14,9 @@ import org.voxelregion.forge.ServerTickTimings;
 abstract class MinecraftServerTickMixin {
     @Unique private long vre$tickStart;
     @Inject(method = "tickServer", at = @At("HEAD"))
-    private void vre$start(BooleanSupplier running, CallbackInfo callback) { vre$tickStart = System.nanoTime(); }
+    private void vre$start(BooleanSupplier running, CallbackInfo callback) {
+        vre$tickStart = System.nanoTime(); ServerTickTimings.beginTick(vre$tickStart);
+    }
     @Inject(method = "tickServer", at = @At("RETURN"))
     private void vre$finish(BooleanSupplier running, CallbackInfo callback) { ServerTickTimings.record(System.nanoTime() - vre$tickStart); }
 }

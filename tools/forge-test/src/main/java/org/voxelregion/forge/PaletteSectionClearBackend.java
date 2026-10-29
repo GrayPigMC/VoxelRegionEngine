@@ -2,6 +2,7 @@
 package org.voxelregion.forge;
 
 import java.util.ArrayList;
+import java.util.BitSet;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashSet;
@@ -12,40 +13,38 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BooleanSupplier;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.ai.navigation.PathNavigation;
-import net.minecraft.world.entity.ai.village.poi.PoiTypes;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
-import net.minecraft.world.level.block.LiquidBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.PalettedContainer;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.levelgen.structure.BoundingBox;
-import net.minecraft.world.level.material.Fluids;
 
 /**
- * Palette-proven bulk replacement of AIR, opaque static blocks and vanilla non-emitting water.
- * Preparation costs O(palette), final validation O(sections), light checks O(exterior surface).
+ * Palette-proven replacement of audited terrain; protected/native-only cells can remain in place.
+ * Whole-section proof costs O(palette), final validation O(sections), light checks O(exterior surface).
+ * Selective/retained palettes use a detached O(4096) encoding and complete native light checks.
  * Batches containing AIR or water additionally invalidate native sky-source/shadow interfaces.
  * A batch rebuilds chunk heightmaps and sky-source columns once and requests one chunk packet.
  * The caller owns geometric coverage, claim checks, budget reservation, receipts and chunk tickets.
  *
- * <p>This path deliberately does not issue 4096 native block callbacks or blockChanged messages.
- * Its host must explicitly support aggregated observers. Unknown integrations use the native or
- * {@link StaticSectionClearBackend} path. Physics policy is NONE; propagation is separate.</p>
+ * <p>This path does not issue native block callbacks for proven terrain. Relevant host mutation
+ * hooks receive aggregate observers. Unknown states remain for native callback processing; an
+ * unrelated installed mod does not veto all vanilla terrain. Physics policy is NONE.</p>
  */
 public final class PaletteSectionClearBackend {
     private static final BlockState AIR = Blocks.AIR.defaultBlockState();
     private static final Set<Heightmap.Types> HEIGHTMAPS = Collections.unmodifiableSet(EnumSet.of(
             Heightmap.Types.WORLD_SURFACE, Heightmap.Types.OCEAN_FLOOR,
             Heightmap.Types.MOTION_BLOCKING, Heightmap.Types.MOTION_BLOCKING_NO_LEAVES));
-    private static final Set<BlockState> STATIC_STATES = staticStates();
 
     /** Full mutation tracking and aggregate observer support are required, not inferred from mod IDs. */
     public interface HostHooks {
@@ -61,6 +60,17 @@ public final class PaletteSectionClearBackend {
 
         /** The previous palette is an unordered proof set, not a per-position snapshot. */
         default void afterSectionCleared(ServerLevel level, LevelChunk chunk, Prepared previous) {}
+    }
+
+    /**
+     * Called on the server thread after storage, metadata and observers. Its future must represent
+     * actual lighting completion. A proof failure uses nativeFallback on the server thread; it must
+     * never substitute an already-completed future for unqueued world light work.
+     */
+    @FunctionalInterface
+    public interface LightingStrategy {
+        CompletableFuture<Void> queue(ServerLevel level, LevelChunk chunk, List<Prepared> plans,
+                                      Supplier<CompletableFuture<Void>> nativeFallback);
     }
 
     public enum Rejection {
@@ -88,7 +98,14 @@ public final class PaletteSectionClearBackend {
         private final LevelChunkSection original;
         private final long revision;
         private final int changedBlocks;
+        private final int keptBlocks;
+        private final int originalNonAir;
         private final Set<BlockState> palette;
+        private final Set<BlockState> retainedPolicyStates;
+        private final BitSet changed;
+        private final BitSet nativeRemainder;
+        private final LevelChunkSection replacement;
+        private final boolean fullLightChecks;
         private final boolean replaySkySources;
         private final Predicate<BlockState> mayClear;
         private final HostHooks hooks;
@@ -104,7 +121,15 @@ public final class PaletteSectionClearBackend {
             this.original = chunk.getSection(sectionIndex);
             this.revision = revision;
             this.changedBlocks = changedBlocks;
+            this.keptBlocks = 0;
+            this.originalNonAir = ((NativeAccess.SectionStats) original).vre$accurateNonAirCount();
             this.palette = Collections.unmodifiableSet(palette);
+            this.retainedPolicyStates = Set.of();
+            this.changed = null;
+            this.nativeRemainder = new BitSet();
+            this.replacement = null;
+            BlockPos minimum = minimumPosition();
+            this.fullLightChecks = palette.stream().anyMatch(state -> !TerrainRemovalProof.boundaryLighting(state, level, minimum));
             // A full non-air water section is transmissive too; count==4096 is not a proof
             // of an initially black field. Preserve the interface repair for every water batch.
             this.replaySkySources = changedBlocks != 4096 || palette.stream().anyMatch(state -> state.is(Blocks.WATER));
@@ -112,21 +137,63 @@ public final class PaletteSectionClearBackend {
             this.hooks = hooks;
         }
 
+        private Prepared(ServerLevel level, LevelChunk chunk, int sectionIndex, long revision,
+                         Set<BlockState> palette, Set<BlockState> retainedPolicyStates, BitSet changed,
+                         BitSet nativeRemainder, int keptBlocks, LevelChunkSection replacement,
+                         Predicate<BlockState> mayClear, HostHooks hooks) {
+            this.level = level; this.chunk = chunk; this.sectionIndex = sectionIndex;
+            this.sectionY = chunk.getSectionYFromSectionIndex(sectionIndex);
+            this.original = chunk.getSection(sectionIndex); this.revision = revision;
+            this.changedBlocks = changed.cardinality();
+            this.keptBlocks = keptBlocks;
+            this.originalNonAir = ((NativeAccess.SectionStats) original).vre$accurateNonAirCount();
+            this.palette = Collections.unmodifiableSet(palette);
+            this.retainedPolicyStates = Collections.unmodifiableSet(retainedPolicyStates);
+            this.changed = changed; this.nativeRemainder = nativeRemainder; this.replacement = replacement;
+            // Nonuniform retained solids / geometry boundaries need the complete native check set.
+            // They still use one section storage replacement, with no terrain setBlock callbacks.
+            this.fullLightChecks = true; this.replaySkySources = true;
+            this.mayClear = mayClear; this.hooks = hooks;
+        }
+
         public int sectionIndex() { return sectionIndex; }
         public int sectionY() { return sectionY; }
         public int changedBlocks() { return changedBlocks; }
+        /** Selected non-air states retained by the static protection policy; native remainders are excluded. */
+        public int keptBlocks() { return keptBlocks; }
+        /** Conservative preparation units: palette proof for a whole clear, voxel scan for a mixed selection. */
+        public int planningWork() { return changed == null || replacement == original
+                ? Math.max(1, palette.size() + retainedPolicyStates.size()) : 4096; }
         public long revision() { return revision; }
         public Set<BlockState> palette() { return palette; }
+        /** Selected unknown states retain native callbacks; callers process these after the safe batch. */
+        public BitSet nativeRemainder() { return (BitSet) nativeRemainder.clone(); }
+        public int nativeRemainderCount() { return nativeRemainder.cardinality(); }
+        /** Actual changed mask, available only during the synchronous aggregate observer. */
+        public boolean changed(int localX, int localY, int localZ) {
+            checkObserver(localX, localY, localZ);
+            return changedAt(localX, localY, localZ);
+        }
+        public BlockState replacementState(int localX, int localY, int localZ) {
+            checkObserver(localX, localY, localZ);
+            return replacement == null ? AIR : replacement.getBlockState(localX, localY, localZ);
+        }
         /**
          * On-demand old state for audited watchers. Read synchronously inside afterSectionCleared
          * only; retaining this plan for later/off-thread queries is forbidden. No eager copy is made.
          */
         public BlockState previousState(int localX, int localY, int localZ) {
+            checkObserver(localX, localY, localZ);
+            return original.getBlockState(localX, localY, localZ);
+        }
+        private void checkObserver(int localX, int localY, int localZ) {
             if (!observerActive || !level.getServer().isSameThread())
                 throw new IllegalStateException("Old section states may only be read synchronously during the commit observer");
             if ((localX | localY | localZ) < 0 || localX > 15 || localY > 15 || localZ > 15)
                 throw new IndexOutOfBoundsException("Section-local coordinates must be 0..15");
-            return original.getBlockState(localX, localY, localZ);
+        }
+        private boolean changedAt(int x, int y, int z) {
+            return changed == null ? !isVanillaAir(original.getBlockState(x, y, z)) : changed.get((y << 8) | (z << 4) | x);
         }
         public BlockPos minimumPosition() {
             return new BlockPos(chunk.getPos().getMinBlockX(), sectionY << 4, chunk.getPos().getMinBlockZ());
@@ -177,14 +244,163 @@ public final class PaletteSectionClearBackend {
     }
 
     /**
+     * Plans a geometric selection without writing the live chunk. Null selects all 4096 positions.
+     * Proven terrain is replaced in a detached palette; policy-protected cells and all native-only
+     * states remain intact. The latter are exposed as a separate mask, never silently discarded.
+     * Caller may spread preparation across ticks, then commit all sections and native remainders
+     * together. Any intervening live mutation invalidates the entire prepared chunk revision.
+     */
+    public static Preparation prepareSelected(ServerLevel level, LevelChunk chunk, int sectionIndex, BitSet selected,
+                                              Predicate<BlockState> mayClear, HostHooks hooks) {
+        Objects.requireNonNull(level); Objects.requireNonNull(chunk);
+        Objects.requireNonNull(mayClear); Objects.requireNonNull(hooks);
+        if (selected != null && selected.length() > 4096) throw new IllegalArgumentException("Selection exceeds section");
+        BitSet selection = selected == null ? null : (BitSet) selected.clone();
+        if (!level.getServer().isSameThread()) return rejected(Rejection.WRONG_THREAD);
+        if (!currentChunk(level, chunk)) return rejected(Rejection.WRONG_CHUNK);
+        if (sectionIndex < 0 || sectionIndex >= chunk.getSections().length) return rejected(Rejection.INVALID_SECTION);
+        if (level.captureBlockSnapshots) return rejected(Rejection.CAPTURING_SNAPSHOTS);
+        if (!hooks.supportsBulk(level)) return rejected(Rejection.HOST_UNSUPPORTED);
+        long revision = hooks.mutationRevision(chunk);
+        if (revision < 0 || revision == Long.MAX_VALUE) return rejected(Rejection.TRACKING_UNAVAILABLE);
+        var postProcessing = chunk.getPostProcessing()[sectionIndex];
+        if (postProcessing != null && !postProcessing.isEmpty()) return rejected(Rejection.POST_PROCESSING);
+        LevelChunkSection original = chunk.getSection(sectionIndex);
+        if (!(original instanceof NativeAccess.SectionStats stats)) return rejected(Rejection.TRACKING_UNAVAILABLE);
+        int originalCount = stats.vre$accurateNonAirCount();
+        if (originalCount < 0 || originalCount > 4096) return rejected(Rejection.TRACKING_UNAVAILABLE);
+        // Preserve the O(palette) all-clear path. An unused old unsupported palette entry merely
+        // sends this attempt to actual-state planning; it no longer blocks the whole section.
+        if (selection == null || selection.cardinality() == 4096) {
+            var whole = prepare(level, chunk, sectionIndex, mayClear, hooks);
+            if (whole.accepted()) return whole;
+            if (hooks.mutationRevision(chunk) != revision || chunk.getSection(sectionIndex) != original)
+                return rejected(Rejection.STALE);
+        }
+        BlockPos minimum = new BlockPos(chunk.getPos().getMinBlockX(), chunk.getSectionYFromSectionIndex(sectionIndex) << 4,
+                chunk.getPos().getMinBlockZ());
+        Set<BlockState> removable = Collections.newSetFromMap(new IdentityHashMap<>());
+        Set<BlockState> retained = Collections.newSetFromMap(new IdentityHashMap<>());
+        Set<BlockState> nativeStates = Collections.newSetFromMap(new IdentityHashMap<>());
+        // A retained-only palette (usually the bedrock band) needs no voxel decoding,
+        // replacement encoding, or light repair. Unused entries can only reject this proof.
+        if (selection == null && auxiliaryState(chunk, sectionIndex) == Rejection.NONE) {
+            boolean actionable = original.maybeHas(state -> {
+                if (isVanillaAir(state)) return false;
+                if (!isSupportedState(state, level, minimum) || mayClear.test(state)) return true;
+                retained.add(state);
+                return false;
+            });
+            if (!actionable && hooks.mutationRevision(chunk) == revision && chunk.getSection(sectionIndex) == original)
+                return new Preparation(new Prepared(level, chunk, sectionIndex, revision, removable, retained,
+                        new BitSet(), new BitSet(), originalCount, original, mayClear, hooks), Rejection.NONE);
+            retained.clear();
+        }
+        // getAll enumerates only currently used palette entries, unlike maybeHas.
+        if (selection == null && chunk.getBlockEntitiesPos().stream().noneMatch(pos -> (pos.getY() >> 4) == chunk.getSectionYFromSectionIndex(sectionIndex))) {
+            var remapped = preparePaletteRemap(level, chunk, sectionIndex, revision, original, originalCount, minimum, mayClear, hooks);
+            if (remapped != null) return remapped;
+        }
+        original.getStates().getAll(state -> {
+            if (isVanillaAir(state)) return;
+            if (!isSupportedState(state, level, minimum)) nativeStates.add(state);
+            else if (mayClear.test(state)) removable.add(state);
+            else retained.add(state);
+        });
+        if (hooks.mutationRevision(chunk) != revision || chunk.getSection(sectionIndex) != original)
+            return rejected(Rejection.STALE);
+        BitSet changed = new BitSet(4096), nativeRemainder = new BitSet(4096);
+        BitSet blockEntities = new BitSet(4096);
+        int sectionY = chunk.getSectionYFromSectionIndex(sectionIndex);
+        for (BlockPos pos : chunk.getBlockEntitiesPos()) if ((pos.getY() >> 4) == sectionY)
+            blockEntities.set(((pos.getY() & 15) << 8) | ((pos.getZ() & 15) << 4) | (pos.getX() & 15));
+        int keptBlocks = 0;
+        PalettedContainer<BlockState> replacementStates = new RegionBlockStateContainer(AIR);
+        for (int index = 0; index < 4096; index++) {
+            int x = index & 15, y = index >>> 8, z = (index >>> 4) & 15;
+            BlockState state = original.getBlockState(x, y, z);
+            boolean select = selection == null || selection.get(index);
+            if (select && removable.contains(state) && !blockEntities.get(index)) changed.set(index);
+            else {
+                if (state != AIR) replacementStates.set(x, y, z, state);
+                if (select && (nativeStates.contains(state) || blockEntities.get(index))) nativeRemainder.set(index);
+                if (select && retained.contains(state) && !blockEntities.get(index)) keptBlocks++;
+            }
+        }
+        LevelChunkSection replacement = new LevelChunkSection(replacementStates, original.getBiomes());
+        if (hooks.mutationRevision(chunk) != revision || chunk.getSection(sectionIndex) != original
+                || stats.vre$accurateNonAirCount() != originalCount) return rejected(Rejection.STALE);
+        return new Preparation(new Prepared(level, chunk, sectionIndex, revision, removable, retained,
+                changed, nativeRemainder, keptBlocks, replacement, mayClear, hooks), Rejection.NONE);
+    }
+
+    private static Preparation preparePaletteRemap(ServerLevel level, LevelChunk chunk, int sectionIndex, long revision,
+            LevelChunkSection original, int originalCount, BlockPos minimum, Predicate<BlockState> mayClear, HostHooks hooks) {
+        var image = NativePaletteImage.capture(original.getStates());
+        if (image == null) return null;
+        byte[] actions = new byte[image.states.size()];
+        var replacementPalette = new ArrayList<>(image.states);
+        for (int i = 0; i < actions.length; i++) {
+            var state = image.states.get(i);
+            if (isVanillaAir(state)) continue;
+            if (!isSupportedState(state, level, minimum)) actions[i] = 2;
+            else if (mayClear.test(state)) { actions[i] = 1; replacementPalette.set(i, AIR); }
+            else actions[i] = 3;
+        }
+        BitSet changed = new BitSet(4096), nativeRemainder = new BitSet(4096), used = new BitSet(actions.length);
+        int[] cursorAndKept = new int[2];
+        image.indices.getAll(id -> {
+            int index = cursorAndKept[0]++; used.set(id);
+            if (actions[id] == 1) changed.set(index);
+            else if (actions[id] == 2) nativeRemainder.set(index);
+            else if (actions[id] == 3) cursorAndKept[1]++;
+        });
+        var replacementStates = image.remap(replacementPalette);
+        if (replacementStates == null) return null;
+        Set<BlockState> removable = Collections.newSetFromMap(new IdentityHashMap<>());
+        Set<BlockState> retained = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (int id = used.nextSetBit(0); id >= 0; id = used.nextSetBit(id + 1)) {
+            if (actions[id] == 1) removable.add(image.states.get(id));
+            else if (actions[id] == 3) retained.add(image.states.get(id));
+        }
+        var replacement = new LevelChunkSection(replacementStates, original.getBiomes());
+        if (hooks.mutationRevision(chunk) != revision || chunk.getSection(sectionIndex) != original
+                || ((NativeAccess.SectionStats)original).vre$accurateNonAirCount() != originalCount) return rejected(Rejection.STALE);
+        return new Preparation(new Prepared(level, chunk, sectionIndex, revision, removable, retained,
+                changed, nativeRemainder, cursorAndKept[1], replacement, mayClear, hooks), Rejection.NONE);
+    }
+
+    /** Cheap read-only guard for a caller assembling one chunk across several ticks; commit still rechecks. */
+    public static boolean validateBatch(List<Prepared> plans) {
+        if (plans.isEmpty()) return true;
+        Prepared first = plans.get(0);
+        if (!first.level.getServer().isSameThread() || !currentChunk(first.level, first.chunk)
+                || first.level.captureBlockSnapshots || first.hooks.mutationRevision(first.chunk) != first.revision)
+            return false;
+        for (Prepared plan : plans) {
+            if (plan.consumed || plan.level != first.level || plan.chunk != first.chunk || plan.hooks != first.hooks
+                    || plan.revision != first.revision || plan.chunk.getSection(plan.sectionIndex) != plan.original
+                    || ((NativeAccess.SectionStats) plan.original).vre$accurateNonAirCount() != plan.originalNonAir
+                    || hasChangedBlockEntity(plan))
+                return false;
+        }
+        return true;
+    }
+
+    /**
      * Commits same-chunk plans made from one revision. All policies and identities are checked before
      * the first palette swap. A post-swap failure is explicitly non-replayable. The returned light
      * future is separate from the caller's disk save acknowledgement and client packet flush.
      */
     public static CommitReport commitBatch(List<Prepared> input, BooleanSupplier finalPermission) {
+        return commitBatch(input, finalPermission, (level, chunk, plans, nativeFallback) -> nativeFallback.get());
+    }
+
+    public static CommitReport commitBatch(List<Prepared> input, BooleanSupplier finalPermission, LightingStrategy lightingStrategy) {
         List<Prepared> plans = List.copyOf(input);
         if (plans.isEmpty()) throw new IllegalArgumentException("No sections to commit");
         Objects.requireNonNull(finalPermission);
+        Objects.requireNonNull(lightingStrategy);
         Prepared first = plans.get(0);
         ServerLevel level = first.level;
         LevelChunk chunk = first.chunk;
@@ -203,52 +419,96 @@ public final class PaletteSectionClearBackend {
         for (Prepared plan : plans) for (BlockState state : plan.palette)
             if (!isSupportedState(state, level, plan.minimumPosition()) || !plan.mayClear.test(state))
                 return notApplied(CommitResult.STALE);
+        for (Prepared plan : plans) for (BlockState state : plan.retainedPolicyStates)
+            if (!isSupportedState(state, level, plan.minimumPosition()) || plan.mayClear.test(state))
+                return notApplied(CommitResult.STALE);
         if (hooks.mutationRevision(chunk) != first.revision) return notApplied(CommitResult.STALE);
-        if (first.revision > Long.MAX_VALUE - plans.size()) return notApplied(CommitResult.STALE);
+        int changedSections = (int) plans.stream().filter(plan -> plan.changedBlocks > 0).count();
+        if (first.revision > Long.MAX_VALUE - changedSections) return notApplied(CommitResult.STALE);
         // Trusted epoch-only hooks run before the final claims callback; any native terrain callback
         // adds extra revision changes and will fail the exact revision check below.
-        for (Prepared plan : plans) hooks.beforePaletteReplaced(level, chunk, plan.sectionY);
+        for (Prepared plan : plans) if (plan.changedBlocks > 0) hooks.beforePaletteReplaced(level, chunk, plan.sectionY);
         if (!finalPermission.getAsBoolean()) return notApplied(CommitResult.PERMISSION_DENIED);
         if (!currentChunk(level, chunk) || level.captureBlockSnapshots
-                || hooks.mutationRevision(chunk) != first.revision + plans.size()) return notApplied(CommitResult.STALE);
+                || hooks.mutationRevision(chunk) != first.revision + changedSections) return notApplied(CommitResult.STALE);
         for (Prepared plan : plans)
             if (chunk.getSection(plan.sectionIndex) != plan.original
-                    || ((NativeAccess.SectionStats) plan.original).vre$accurateNonAirCount() != plan.changedBlocks
-                    || auxiliaryState(chunk, plan.sectionIndex) != Rejection.NONE) return notApplied(CommitResult.STALE);
+                    || ((NativeAccess.SectionStats) plan.original).vre$accurateNonAirCount() != plan.originalNonAir
+                    || hasChangedBlockEntity(plan)
+                    || (plan.changed == null && auxiliaryState(chunk, plan.sectionIndex) != Rejection.NONE)
+                    || (chunk.getPostProcessing()[plan.sectionIndex] != null
+                    && !chunk.getPostProcessing()[plan.sectionIndex].isEmpty())) return notApplied(CommitResult.STALE);
+        if (changedSections == 0) return new CommitReport(CommitResult.APPLIED_QUEUED, 0, false,
+                CompletableFuture.completedFuture(null));
 
         // Allocate before mutating, so allocation/constructor failure cannot leave a partially swapped batch.
         List<LevelChunkSection> replacements = new ArrayList<>(plans.size());
         for (Prepared plan : plans)
-            replacements.add(new LevelChunkSection(new PalettedContainer<>(Block.BLOCK_STATE_REGISTRY, AIR,
-                    PalettedContainer.Strategy.SECTION_STATES), plan.original.getBiomes()));
+            replacements.add(plan.changedBlocks == 0 ? plan.original : plan.replacement != null ? plan.replacement
+                    : new LevelChunkSection(new RegionBlockStateContainer(AIR), plan.original.getBiomes()));
         chunk.setUnsaved(true);
         for (int i = 0; i < plans.size(); i++) chunk.getSections()[plans.get(i).sectionIndex] = replacements.get(i);
         try {
-            for (Prepared plan : plans) hooks.afterPaletteReplaced(level, chunk, plan.sectionY);
-            for (Heightmap.Types type : HEIGHTMAPS) chunk.setHeightmap(type, new Heightmap(chunk, type).getRawData());
-            Heightmap.primeHeightmaps(chunk, HEIGHTMAPS);
-            chunk.initializeLightSources();
+            for (Prepared plan : plans) if (plan.changedBlocks > 0) hooks.afterPaletteReplaced(level, chunk, plan.sectionY);
+            if (!ClearedColumnMetadata.rebuild(chunk, HEIGHTMAPS)) {
+                for (Heightmap.Types type : HEIGHTMAPS) chunk.setHeightmap(type, new Heightmap(chunk, type).getRawData());
+                if (chunk.getHighestFilledSectionIndex() >= 0) Heightmap.primeHeightmaps(chunk, HEIGHTMAPS);
+                chunk.initializeLightSources();
+            }
             var lighting = level.getChunkSource().getLightEngine();
             for (Prepared plan : plans) {
+                if (plan.changedBlocks == 0) continue;
                 BlockPos minimum = plan.minimumPosition();
                 BoundingBox area = new BoundingBox(minimum.getX(), minimum.getY(), minimum.getZ(),
                         minimum.getX() + 15, minimum.getY() + 15, minimum.getZ() + 15);
-                level.getBlockTicks().clearArea(area);
-                level.getFluidTicks().clearArea(area);
-                lighting.updateSectionStatus(minimum, true);
+                if (plan.changed == null) {
+                    level.getBlockTicks().clearArea(area);
+                    level.getFluidTicks().clearArea(area);
+                } else {
+                    Predicate<BlockPos> removed = pos -> (pos.getY() >> 4) == plan.sectionY
+                            && plan.changedAt(pos.getX() & 15, pos.getY() & 15, pos.getZ() & 15);
+                    ((NativeAccess.TickFilter) level.getBlockTicks()).vre$clearChanged(chunk.getPos(), removed);
+                    ((NativeAccess.TickFilter) level.getFluidTicks()).vre$clearChanged(chunk.getPos(), removed);
+                }
+                lighting.updateSectionStatus(minimum, chunk.getSection(plan.sectionIndex).hasOnlyAir());
             }
-            CompletableFuture<Void> lightWork = ((NativeAccess.LightFence) lighting).vre$batchChecks(chunk.getPos(),
-                    plans.stream().mapToInt(Prepared::sectionY).toArray(), plans.stream().anyMatch(plan -> plan.replaySkySources));
             updateNavigation(level, plans);
             for (Prepared plan : plans) {
+                if (plan.changedBlocks == 0) continue;
                 plan.observerActive = true;
                 try { hooks.afterSectionCleared(level, chunk, plan); }
                 finally { plan.observerActive = false; }
             }
+            CompletableFuture<Void> lightWork = Objects.requireNonNull(lightingStrategy.queue(level, chunk, plans,
+                    () -> queueNativeLighting(level, chunk, plans)), "Lighting strategy returned no completion future");
             return new CommitReport(CommitResult.APPLIED_QUEUED, plans.stream().mapToInt(Prepared::changedBlocks).sum(), true, lightWork);
         } catch (RuntimeException | LinkageError failure) {
-            throw new CommitFailure(plans.size(), failure);
+            throw new CommitFailure(changedSections, failure);
         }
+    }
+
+    private static CompletableFuture<Void> queueNativeLighting(ServerLevel level, LevelChunk chunk, List<Prepared> plans) {
+        if (!level.getServer().isSameThread()) throw new IllegalStateException("Native lighting fallback must queue on the server thread");
+        var lighting = level.getChunkSource().getLightEngine();
+        List<NativeAccess.LightChanges> changes = new ArrayList<>();
+        for (Prepared plan : plans) {
+            if (plan.changedBlocks == 0 || !plan.fullLightChecks) continue;
+            BitSet cells = plan.changed;
+            if (cells == null) {
+                cells = new BitSet(4096);
+                for (int index = 0; index < 4096; index++)
+                    if (plan.changedAt(index & 15, index >>> 8, (index >>> 4) & 15)) cells.set(index);
+            }
+            changes.add(new NativeAccess.LightChanges(plan.sectionY, cells));
+        }
+        int[] boundarySections = plans.stream().filter(plan -> plan.changedBlocks > 0 && !plan.fullLightChecks)
+                .mapToInt(Prepared::sectionY).toArray();
+        var fence = (NativeAccess.LightFence) lighting;
+        var changedWork = changes.isEmpty() ? CompletableFuture.<Void>completedFuture(null)
+                : fence.vre$changedChecks(chunk.getPos(), changes);
+        var boundaryWork = boundarySections.length == 0 ? fence.vre$afterChunkWork(chunk.getPos())
+                : fence.vre$batchChecks(chunk.getPos(), boundarySections, plans.stream().anyMatch(plan -> plan.replaySkySources));
+        return CompletableFuture.allOf(changedWork, boundaryWork);
     }
 
     /** Aggregate native navigation checks; mixed cubes may conservatively recompute extra paths once. */
@@ -304,36 +564,19 @@ public final class PaletteSectionClearBackend {
         return postProcessing != null && !postProcessing.isEmpty() ? Rejection.POST_PROCESSING : Rejection.NONE;
     }
 
+    private static boolean hasChangedBlockEntity(Prepared plan) {
+        for (BlockPos position : plan.chunk.getBlockEntitiesPos())
+            if ((position.getY() >> 4) == plan.sectionY
+                    && plan.changedAt(position.getX() & 15, position.getY() & 15, position.getZ() & 15)) return true;
+        return false;
+    }
+
     private static boolean isSupportedState(BlockState state, ServerLevel level, BlockPos position) {
-        // Exact vanilla identity excludes mod fluids, waterlogged solids and lava emission. Water's
-        // inherited onRemove has no fluid interaction callback; the committed region's pending
-        // fluid ticks are cleared explicitly. Host permission still runs for every palette state,
-        // so clearFluids=false and protected tags cannot be bypassed by this fast path.
-        if (state.is(Blocks.WATER) && state.getBlock().getClass() == LiquidBlock.class) {
-            var fluid = state.getFluidState();
-            return (fluid.getType() == Fluids.WATER || fluid.getType() == Fluids.FLOWING_WATER)
-                    && !state.hasBlockEntity() && !state.isRandomlyTicking() && PoiTypes.forState(state).isEmpty()
-                    && state.getLightEmission(level, position) == 0 && state.getLightBlock(level, position) == 1;
-        }
-        return STATIC_STATES.contains(state) && state.getBlock().getClass() == Block.class
-                && state == state.getBlock().defaultBlockState() && state.getValues().isEmpty()
-                && !state.hasBlockEntity() && state.getFluidState().isEmpty() && !state.isRandomlyTicking()
-                && PoiTypes.forState(state).isEmpty() && state.getLightEmission(level, position) == 0
-                && state.getLightBlock(level, position) == 15 && Block.isShapeFullBlock(state.getOcclusionShape(level, position));
+        return TerrainRemovalProof.supports(state, level, position);
     }
 
     private static boolean isVanillaAir(BlockState state) {
         return state == AIR || state == Blocks.CAVE_AIR.defaultBlockState() || state == Blocks.VOID_AIR.defaultBlockState();
-    }
-
-    private static Set<BlockState> staticStates() {
-        Set<BlockState> result = Collections.newSetFromMap(new IdentityHashMap<>());
-        for (Block block : new Block[] { Blocks.STONE, Blocks.GRANITE, Blocks.POLISHED_GRANITE,
-                Blocks.DIORITE, Blocks.POLISHED_DIORITE, Blocks.ANDESITE, Blocks.POLISHED_ANDESITE,
-                Blocks.DIRT, Blocks.COARSE_DIRT, Blocks.COBBLESTONE, Blocks.END_STONE,
-                Blocks.SANDSTONE, Blocks.RED_SANDSTONE, Blocks.COBBLED_DEEPSLATE })
-            result.add(block.defaultBlockState());
-        return Collections.unmodifiableSet(result);
     }
 
     private PaletteSectionClearBackend() {}

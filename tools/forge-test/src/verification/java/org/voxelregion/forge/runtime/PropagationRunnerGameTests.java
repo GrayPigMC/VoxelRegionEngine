@@ -99,7 +99,7 @@ public final class PropagationRunnerGameTests {
         OrderingGate gate = new OrderingGate(level, chunk);
         MinecraftForge.EVENT_BUS.register(gate);
         AtomicBoolean unsafeCapture = new AtomicBoolean();
-        Runnable unsubscribe = ChunkMutationTracking.subscribe((changed, revision) -> {
+        Runnable unsubscribe = ChunkMutationTracking.subscribe(level, (changed, revision) -> {
             if (changed.getLevel() == level && changed.getPos().equals(chunk) && later.occlusionReady
                     && (earlier.state != OperationData.State.WRITTEN || earlier.unconfirmedFences != 0))
                 unsafeCapture.set(true);
@@ -211,7 +211,7 @@ public final class PropagationRunnerGameTests {
         Path directory = level.getServer().getWorldPath(LevelResource.ROOT).resolve("data/voxelregion_test_intents");
         AtomicReference<OperationData.Task> running = new AtomicReference<>();
         AtomicBoolean firstWriteSeen = new AtomicBoolean(), unsafeFirstWrite = new AtomicBoolean();
-        Runnable unsubscribe = ChunkMutationTracking.subscribe((changedChunk, revision) -> {
+        Runnable unsubscribe = ChunkMutationTracking.subscribe(level, (changedChunk, revision) -> {
             OperationData.Task task = running.get();
             if (changedChunk.getLevel() == level && changedChunk.getPos().equals(chunk) && task != null
                     && firstWriteSeen.compareAndSet(false, true)) {

@@ -165,7 +165,8 @@ public final class PipelineGameTests {
             AdapterConfig.PROGRESSION.set(AdapterConfig.Progression.CENTER_OUT);
             AdapterConfig.PROPAGATION.set(FrozenOcclusion.Mode.NONE);
             AdapterConfig.SHELL_WIDTH.set(32); AdapterConfig.ENTITY_DAMAGE.set(0.0);
-            task = ForgeOperationRunner.submitGeometry(level, UUID.randomUUID(), shape, ForgeRegionEngine.Options.DEFAULT);
+            task = LegacyShellFixtureGameTests.submitGeometry(level, UUID.randomUUID(), shape,
+                    new ForgeRegionEngine.Options(0, false, true));
         } finally {
             AdapterConfig.PROGRESSION.set(progression); AdapterConfig.PROPAGATION.set(propagation);
             AdapterConfig.SHELL_WIDTH.set(width); AdapterConfig.ENTITY_DAMAGE.set(damage);

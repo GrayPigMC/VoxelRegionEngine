@@ -39,21 +39,29 @@ public final class VoxelRegionTestMod {
     private void commands(RegisterCommandsEvent event) {
         var root = Commands.literal("vre").requires(source -> source.hasPermission(2));
         var giveFuse = Commands.argument("fuse", IntegerArgumentType.integer(0, 1200))
-                .executes(ctx -> give(ctx.getSource(), IntegerArgumentType.getInteger(ctx, "radius"), IntegerArgumentType.getInteger(ctx, "fuse"), false, true));
+                .executes(ctx -> give(ctx.getSource(), IntegerArgumentType.getInteger(ctx, "radius"), IntegerArgumentType.getInteger(ctx, "fuse"), true, true));
         var giveGenerate = Commands.argument("generate", BoolArgumentType.bool())
                 .executes(ctx -> give(ctx.getSource(), IntegerArgumentType.getInteger(ctx, "radius"), IntegerArgumentType.getInteger(ctx, "fuse"), BoolArgumentType.getBool(ctx, "generate"), true));
-        giveGenerate.then(Commands.argument("clearFluids", BoolArgumentType.bool())
+        var giveFluids = Commands.argument("clearFluids", BoolArgumentType.bool())
                 .executes(ctx -> give(ctx.getSource(), IntegerArgumentType.getInteger(ctx, "radius"), IntegerArgumentType.getInteger(ctx, "fuse"),
-                        BoolArgumentType.getBool(ctx, "generate"), BoolArgumentType.getBool(ctx, "clearFluids"))));
+                        BoolArgumentType.getBool(ctx, "generate"), BoolArgumentType.getBool(ctx, "clearFluids")));
+        giveFluids.then(Commands.argument("destroyBedrock", BoolArgumentType.bool())
+                .executes(ctx -> give(ctx.getSource(), IntegerArgumentType.getInteger(ctx, "radius"), IntegerArgumentType.getInteger(ctx, "fuse"),
+                        BoolArgumentType.getBool(ctx, "generate"), BoolArgumentType.getBool(ctx, "clearFluids"), BoolArgumentType.getBool(ctx, "destroyBedrock"))));
+        giveGenerate.then(giveFluids);
         giveFuse.then(giveGenerate);
         root.then(Commands.literal("give").then(Commands.argument("radius", IntegerArgumentType.integer(1, 10000)).then(giveFuse)));
         var blastRadius = Commands.argument("radius", IntegerArgumentType.integer(1, 10000))
-                .executes(ctx -> blast(ctx.getSource(), IntegerArgumentType.getInteger(ctx, "radius"), false, true));
+                .executes(ctx -> blast(ctx.getSource(), IntegerArgumentType.getInteger(ctx, "radius"), true, true));
         var blastGenerate = Commands.argument("generate", BoolArgumentType.bool())
                 .executes(ctx -> blast(ctx.getSource(), IntegerArgumentType.getInteger(ctx, "radius"), BoolArgumentType.getBool(ctx, "generate"), true));
-        blastGenerate.then(Commands.argument("clearFluids", BoolArgumentType.bool())
+        var blastFluids = Commands.argument("clearFluids", BoolArgumentType.bool())
                 .executes(ctx -> blast(ctx.getSource(), IntegerArgumentType.getInteger(ctx, "radius"),
-                        BoolArgumentType.getBool(ctx, "generate"), BoolArgumentType.getBool(ctx, "clearFluids"))));
+                        BoolArgumentType.getBool(ctx, "generate"), BoolArgumentType.getBool(ctx, "clearFluids")));
+        blastFluids.then(Commands.argument("destroyBedrock", BoolArgumentType.bool())
+                .executes(ctx -> blast(ctx.getSource(), IntegerArgumentType.getInteger(ctx, "radius"),
+                        BoolArgumentType.getBool(ctx, "generate"), BoolArgumentType.getBool(ctx, "clearFluids"), BoolArgumentType.getBool(ctx, "destroyBedrock"))));
+        blastGenerate.then(blastFluids);
         blastRadius.then(blastGenerate);
         root.then(Commands.literal("blast").then(blastRadius));
         root.then(Commands.literal("status").executes(ctx -> {
@@ -74,6 +82,10 @@ public final class VoxelRegionTestMod {
     }
 
     private static int give(CommandSourceStack source, int radius, int fuse, boolean generate, boolean clearFluids) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        return give(source, radius, fuse, generate, clearFluids, false);
+    }
+    private static int give(CommandSourceStack source, int radius, int fuse, boolean generate, boolean clearFluids,
+            boolean destroyBedrock) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
         if (radius > ForgeRegionEngine.maximumRadius()) {
             source.sendFailure(Component.literal("Radius exceeds server maximum " + ForgeRegionEngine.maximumRadius()));
             return 0;
@@ -83,18 +95,22 @@ public final class VoxelRegionTestMod {
         stack.getOrCreateTag().putInt("Fuse", fuse);
         stack.getOrCreateTag().putBoolean("Generate", generate);
         stack.getOrCreateTag().putBoolean("ClearFluids", clearFluids);
+        stack.getOrCreateTag().putBoolean("DestroyBedrock", destroyBedrock);
         var player = source.getPlayerOrException();
         if (!player.addItem(stack)) player.drop(stack, false);
         source.sendSuccess(() -> Component.literal("Region charge: radius=" + radius + ", fuse=" + fuse + " ticks, normal generation=" + generate
-                + ", clearFluids=" + clearFluids + ". Use on a block to arm a stationary particle marker."), false);
+                + ", clearFluids=" + clearFluids + ", destroyBedrock=" + destroyBedrock + ". Use on a block to arm a stationary particle marker."), false);
         return 1;
     }
 
     private static int blast(CommandSourceStack source, int radius, boolean generate, boolean clearFluids) {
+        return blast(source, radius, generate, clearFluids, false);
+    }
+    private static int blast(CommandSourceStack source, int radius, boolean generate, boolean clearFluids, boolean destroyBedrock) {
         UUID actor = source.getEntity() == null ? new UUID(0, 0) : source.getEntity().getUUID();
         try {
             var handle = ForgeRegionEngine.submitSphere(source.getLevel(), actor, BlockPos.containing(source.getPosition()), radius,
-                    new ForgeRegionEngine.Options(0, generate, clearFluids));
+                    new ForgeRegionEngine.Options(0, generate, clearFluids, destroyBedrock));
             var status = ForgeRegionEngine.status(source.getLevel(), handle.id()).orElseThrow();
             source.sendSuccess(() -> status.asComponent(), true);
             return 1;

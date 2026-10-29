@@ -53,6 +53,38 @@ public final class NativeFenceGameTests {
     private static final TicketType<UUID> HOLD = TicketType.create("vre_fence_test", Comparator.<UUID>naturalOrder());
     private static final String HASH = "native-save-image-fixture";
 
+    @GameTest(template = "empty", batch = "vre_custom_light_prerequisite", timeoutTicks = 1500)
+    public static void customLightingCompletesBeforeSaveAndPublication(GameTestHelper helper) {
+        var level = helper.getLevel();
+        var pos = helper.absolutePos(new BlockPos(2, 3, 2));
+        var chunk = level.getChunkAt(pos);
+        var holder = UUID.randomUUID();
+        level.getChunkSource().addRegionTicket(HOLD, chunk.getPos(), 0, holder);
+        CompletableFuture<Void> customLight = new CompletableFuture<>();
+        var saved = NativeCommitFences.enqueueSave(level, chunk, customLight).saved();
+        var packet = ChunkPacketQueue.enqueue(level, chunk, customLight);
+        AtomicReference<CompletableFuture<Optional<CompoundTag>>> read = new AtomicReference<>();
+        cleanupOnCompletion(helper, () -> {
+            customLight.completeExceptionally(new IllegalStateException("Fixture ended before custom lighting"));
+            level.getChunkSource().removeRegionTicket(HOLD, chunk.getPos(), 0, holder);
+        });
+        helper.startSequence().thenIdle(12).thenExecute(() -> {
+            helper.assertTrue(!saved.isDone() && !packet.isDone(),
+                    "Neither disk acknowledgement nor publication may overtake pending custom lighting");
+            level.setBlock(pos, Blocks.GLOWSTONE.defaultBlockState(), Block.UPDATE_CLIENTS | Block.UPDATE_KNOWN_SHAPE);
+            customLight.complete(null);
+        }).thenWaitUntil(() -> helper.assertTrue(saved.isDone() && packet.isDone(), "All native stages completed"))
+                .thenExecute(() -> {
+                    saved.join(); packet.join();
+                    helper.assertTrue(level.getBrightness(LightLayer.BLOCK, pos) == 15,
+                            "Native fence also covers changes made while custom lighting was pending");
+                    read.set(((IOWorker) level.getChunkSource().chunkMap.chunkScanner()).loadAsync(chunk.getPos()));
+                }).thenWaitUntil(() -> helper.assertTrue(read.get().isDone(), "Persisted image readable"))
+                .thenExecute(() -> helper.assertTrue(savedState(read.get().join().orElseThrow(), pos).is(Blocks.GLOWSTONE),
+                        "Saved image was serialized after the custom-light prerequisite, never before it"))
+                .thenSucceed();
+    }
+
     @GameTest(template = "empty", batch = "vre_native_fence_image", timeoutTicks = 500)
     public static void terrainAndReceiptReachTheSameNativeImage(GameTestHelper helper) {
         var level = helper.getLevel();

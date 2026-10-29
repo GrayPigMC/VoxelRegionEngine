@@ -79,7 +79,7 @@ final class OperationOcclusion {
                             public long revision() { return RULE_REVISION.get(); }
                         }, chunk -> ChunkReceipts.of(chunk).trackingValid() ? ChunkReceipts.of(chunk).mutationRevision() : -1);
                 var capture = work.capture;
-                work.unsubscribe = ChunkMutationTracking.subscribe((chunk, revision) -> {
+                work.unsubscribe = ChunkMutationTracking.subscribe(level, (chunk, revision) -> {
                     if (chunk.getLevel() == level) capture.observeMutation(new ChunkKey(chunk.getPos().x, chunk.getPos().z), revision);
                 });
             }

@@ -34,7 +34,8 @@ public final class RegionChargeItem extends Item {
         BlockPos center = context.getClickedPos().relative(context.getClickedFace());
         try {
             var handle = ForgeRegionEngine.submitSphere(level, player.getUUID(), center, tag.getInt("Radius"),
-                    new ForgeRegionEngine.Options(tag.getInt("Fuse"), tag.getBoolean("Generate"), clearsFluids(context.getItemInHand())));
+                    new ForgeRegionEngine.Options(tag.getInt("Fuse"), !tag.contains("Generate") || tag.getBoolean("Generate"),
+                            clearsFluids(context.getItemInHand()), tag.getBoolean("DestroyBedrock")));
             level.playSound(null, center, SoundEvents.TNT_PRIMED, SoundSource.BLOCKS, 1.0F, 1.0F);
             player.displayClientMessage(ForgeRegionEngine.status(level, handle.id()).orElseThrow().asComponent(), false);
             if (!player.getAbilities().instabuild) context.getItemInHand().shrink(1);
@@ -49,7 +50,8 @@ public final class RegionChargeItem extends Item {
     public void appendHoverText(ItemStack stack, Level level, List<Component> tooltip, TooltipFlag flag) {
         var tag = stack.getTag();
         if (tag != null) tooltip.add(Component.literal("Radius " + tag.getInt("Radius") + ", fuse " + tag.getInt("Fuse")
-                + " ticks; generation " + tag.getBoolean("Generate") + "; clearFluids " + clearsFluids(stack)));
+                + " ticks; generation " + (!tag.contains("Generate") || tag.getBoolean("Generate")) + "; clearFluids " + clearsFluids(stack)
+                + "; destroyBedrock " + tag.getBoolean("DestroyBedrock")));
         tooltip.add(Component.literal("Requires permission level 2. Stationary charge; server selects neighbor physics."));
     }
 

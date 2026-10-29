@@ -3,7 +3,7 @@ package org.voxelregion.forge;
 
 /** Full tickServer duration, including Forge END listeners omitted by vanilla averageTickTime. */
 public final class ServerTickTimings {
-    private static volatile long lastNanos, samples;
+    private static volatile long lastNanos, samples, tickStarted;
     private static volatile double averageMillis;
     public static void record(long nanos) {
         lastNanos = Math.max(0, nanos);
@@ -12,8 +12,10 @@ public final class ServerTickTimings {
         samples++;
     }
     public static long lastNanos() { return lastNanos; }
+    public static void beginTick(long now) { tickStarted = now; }
+    public static long currentTickElapsedNanos() { return tickStarted == 0 ? 0 : Math.max(0, System.nanoTime() - tickStarted); }
     public static long sampleCount() { return samples; }
     public static double averageMillis() { return averageMillis; }
-    public static void reset() { lastNanos = samples = 0; averageMillis = 0; }
+    public static void reset() { lastNanos = samples = tickStarted = 0; averageMillis = 0; }
     private ServerTickTimings() {}
 }

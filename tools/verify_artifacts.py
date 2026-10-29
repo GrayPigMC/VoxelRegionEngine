@@ -48,6 +48,9 @@ def main():
         metadata = json.loads(archive.read('META-INF/jarjar/metadata.json'))
         libraries = [entry for entry in metadata['jars'] if entry['identifier']['group'] == 'org.voxelregion']
         require(len(libraries) == 2, 'Expected independent nested engine and Forge adapter')
+        require({entry['identifier']['artifact'] for entry in libraries} ==
+                {'voxel-region-engine', 'voxel-region-forge-adapter-1.20.1'},
+                'JarJar identities must match the GTLCore embedding, not Gradle subproject aliases')
         found_engine = found_adapter = 0
         classes = set()
         archives = [(args.forge.name, archive)]
@@ -56,7 +59,9 @@ def main():
         for label, part in archives:
             part_names = part.namelist()
             require(not any('GameTests' in n or 'ProbeBlocks' in n or n.endswith('/empty.nbt')
-                            or '/dimension/generation_' in n for n in part_names),
+                            or '/dimension/generation_' in n
+                            or n == 'data/voxelregion_test/loot_tables/chests/verification_counted_container.json'
+                            for n in part_names),
                     'Verification-only content leaked: ' + label)
             require(not any('.local/' in n or '/logs/' in n or '/world/' in n for n in part_names), 'Local evidence leaked: ' + label)
             this_classes = {n for n in part_names if n.endswith('.class')}

@@ -32,6 +32,31 @@ import org.voxelregion.testmod.VoxelRegionTestMod;
 public final class ChargeGameTests {
     private static final TicketType<UUID> HOLD = TicketType.create("vre_charge_test", Comparator.<UUID>naturalOrder());
 
+    @GameTest(template = "empty", batch = "vre_charge_explicit_generation", timeoutTicks = 100)
+    public static void explicitGenerationFalseSurvivesChargeAcceptance(GameTestHelper helper) {
+        var level = helper.getLevel();
+        var center = helper.absolutePos(new BlockPos(1, 3, 1));
+        UUID actor = UUID.randomUUID();
+        var player = new FakePlayer(level, new GameProfile(actor, "VREGenerationFlagFixture")) {
+            @Override public boolean hasPermissions(int permission) { return permission <= 2; }
+            @Override public void displayClientMessage(Component message, boolean overlay) {}
+        };
+        var stack = new ItemStack(VoxelRegionTestMod.CHARGE.get());
+        stack.getOrCreateTag().putInt("Radius", 2);
+        stack.getOrCreateTag().putInt("Fuse", 1200);
+        stack.getOrCreateTag().putBoolean("Generate", false);
+        player.setItemInHand(InteractionHand.MAIN_HAND, stack);
+        var hit = new BlockHitResult(Vec3.atCenterOf(center.below()), Direction.UP, center.below(), false);
+        var result = stack.getItem().useOn(new UseOnContext(player, InteractionHand.MAIN_HAND, hit));
+        helper.assertTrue(result == InteractionResult.CONSUME, "Explicit generation policy charge is accepted");
+        var task = OperationData.get(level).tasks.stream().filter(t -> t.actor.equals(actor)).findFirst().orElseThrow();
+        try {
+            helper.assertTrue(task.wholeChunk && !task.generate && task.state == OperationData.State.FUSE,
+                    "Explicit Generate=false keeps the complete-chunk path while disabling new terrain generation");
+        } finally { ForgeOperationRunner.cancel(task); }
+        helper.succeed();
+    }
+
     @GameTest(template = "empty", batch = "vre_charge_fuse", timeoutTicks = 2400)
     public static void radius2000ChargeHonorsFuseThenClearsItsCenter(GameTestHelper helper) {
         var level = helper.getLevel();
@@ -64,9 +89,12 @@ public final class ChargeGameTests {
         task[0] = OperationData.get(level).tasks.stream().filter(t -> t.actor.equals(actor)).findFirst().orElseThrow();
         helper.assertTrue(task[0].state == OperationData.State.FUSE && task[0].fuse == 20,
                 "The actual item captures the requested twenty tick fuse");
+        helper.assertTrue(task[0].wholeChunk && task[0].generate,
+                "A charge without a legacy Generate NBT field defaults to complete chunks and generation enabled");
         helper.startSequence().thenIdle(18).thenExecute(() -> {
             helper.assertTrue(level.getBlockState(center).is(Blocks.STONE), "The charge does not remove its center before the fuse expires");
-        }).thenWaitUntil(() -> helper.assertTrue(level.getBlockState(center).isAir(), "Loaded blast center clears after fuse, without waiting for distant unloaded corners"))
+        }).thenWaitUntil(() -> helper.assertTrue(level.getBlockState(center).isAir(),
+                "Loaded blast center clears after fuse, without waiting for distant unloaded corners: " + ForgeOperationRunner.status(task[0]).getString()))
                 .thenExecute(() -> {
                     helper.assertTrue(task[0].changed > 0 && level.getBlockState(center.below()).is(Blocks.BEDROCK),
                             "The live runtime writes terrain and retains the protected support");

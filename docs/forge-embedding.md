@@ -33,6 +33,8 @@ ForgeRegionEngine.install(FMLJavaModLoadingContext.get().getModEventBus(),
 
 ## 提交、观察和控制
 
+独立的范围实体杀死/清理入口、玩家选项及未加载实体处理见 [范围实体操作 API](entity-operations.md)。
+
 所有世界相关公开 API 必须在对应服务器线程执行。网络处理器应先转到服务器任务队列；宿主负责认证权限、操作来源与调用频率。`actor` 用于记录和实体伤害归属，不是管理员授权证明。公开入口不提供绕过领地保护的客户端开关。
 
 ```java
@@ -42,7 +44,9 @@ var status = ForgeRegionEngine.status(level, handle.id()).orElseThrow();
 var paused = ForgeRegionEngine.control(level, handle.id(), ForgeRegionEngine.Control.PAUSE);
 ```
 
-`Options(fuseTicks, generateMissingChunks, clearFluids)` 默认值为 `(0,false,true)`。球心是 `centerBlockPos` 的方块中心；半径和引信必须通过服务器配置限制。保护、物理、推进与传播策略由服务器配置选择并进入任务策略，预算由服务器全局共享。在默认 `NONE` 传播下，`generateMissingChunks=false` 记录并排除未加载区块，不因以后加载而补炸；它不保证整个球体全部清除。`clearFluids=false` 保留纯流体，并在删除允许破坏的含水固体后写回其流体状态。
+`Options(fuseTicks, generateMissingChunks, clearFluids, destroyBedrock)` 默认值为 `(0,true,true,false)`。原来的三参数构造器继续可用，等价于 `destroyBedrock=false`。球心是 `centerBlockPos` 的方块中心；半径和引信必须通过服务器配置限制。保护、物理、推进与传播策略由服务器配置选择并进入任务策略，预算由服务器全局共享。新任务的 `generateMissingChunks=false` 仍读取已经保存的 FULL 区块，只记录并排除需要生成的区块；排除项不会因以后加载而补炸。`clearFluids=false` 保留纯流体，并在删除允许破坏的含水固体后写回其流体状态。
+
+`destroyBedrock=true` 只授权破坏选区内的基岩，不允许绕过领地、世界边界或破坏其他受保护方块。该选项进入持久化意图，恢复任务时沿用原值；旧任务缺少该字段时仍保留基岩。未知生成器不能被当作没有基岩；新建地形所需保护层必须在完成光照、发布和保存确认之前准备好。
 
 通用几何使用 `submit`，不需要把盒或柱近似成球：
 
@@ -61,13 +65,13 @@ var handle = ForgeRegionEngine.submit(level, actorUuid, restored,
 
 通用提交按包围盒派生执行中心及向上取整的包围半径，用于波面、额度和实体伤害衰减；精确选区仍由原几何决定。包围半径同样受服务器最大半径限制，不能只按盒边长估计是否会被接受。需要方块中心球语义时直接使用 `submitSphere`。
 
-新 `CENTER_OUT` 任务明确先调度中心区块，首阶段为一格半径，再按默认 32 格宽的互不重叠壳层推进；非球体与壳层相交。`AS_FAST_AS_POSSIBLE` 使用单阶段并侧重存储局部性。旧任务缺少 `centralBootstrap` 字段时沿用旧解释；任务持久化的壳宽和阶段协议不会被当前配置替换。
+新 `CENTER_OUT` 任务先调度中心区块，再按爆心到水平区块边界的距离推进，完整准备一个区块后一次提交。`AS_FAST_AS_POSSIBLE` 同样整区块提交，顺序侧重存储局部性。持久化的 `wholeChunk` 区分新协议，缺少该字段的旧球壳任务保留旧解释，不由当前配置覆盖。
 
 提交返回 `Handle(dimension,id)` 前，适配器已经写入持久接受记录。提交可能抛出 `IOException` 或因边界、配额、缺少 hook 而拒绝；调用者不能把失败当成接受成功。`status` 和 `statuses` 返回不可变快照，不暴露 `Task`、SavedData 或可变游标。使用 `Status.asComponent()` 可取得独立的状态文本。
 
 控制动作有 `PAUSE`、`RESUME`、`CANCEL`。`ControlResult.applied` 表示本次动作是否被接受，`reason` 给出拒绝原因，`status` 在任务存在时包含动作后的快照。取消保留已经完成的世界写入。`PAUSED_RECOVERY` 不能通过普通 resume 强制回放；没有可靠证据的旧操作必须保持暂停或取消。
 
-`WRITTEN` 表示所有选中阶段完成，原生光照、地形/POI 保存和所需网络队列已确认。`SETTLING` 仍在等待这些确认。状态中的 `phase` 从 0 开始，显示文本按 1 开始；`completedChunkPhases` 统计区块阶段，不是唯一 chunk 数量。同一 chunk 可以经历多个向外推进的壳层。
+`WRITTEN` 表示所有选中阶段完成，原生光照、地形/POI 保存和所需网络队列已确认。`SETTLING` 仍在等待这些确认。`completedChunkPhases` 保留兼容的区块阶段计数：新整区块任务每个区块只有一个阶段；旧球壳任务中同一区块可能贡献多个阶段。
 
 `Status.progress()` 分别报告准备阶段，以及正在写入、加载、等待光照、存盘和发包的区块数。取消或失败的任务仍可能有此前提交的工作等待收尾，应检查这些计数；不能把接受取消等同于已经回滚或全部排空。
 

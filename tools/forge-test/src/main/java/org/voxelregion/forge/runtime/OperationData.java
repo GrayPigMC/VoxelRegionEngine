@@ -17,6 +17,7 @@ import org.voxelregion.geometry.SphereShell;
 import org.voxelregion.geometry.Point3;
 import org.voxelregion.geometry.IntBox;
 import org.voxelregion.spatial.ChunkCursor;
+import org.voxelregion.spatial.CenterOutChunkCursor;
 
 final class OperationData extends SavedData {
     enum State { FUSE, RUNNING, SETTLING, RECOVERING, PAUSED, PAUSED_UNLOADED, PAUSED_PROTECTION, PAUSED_RECOVERY, FAILED, CANCELLED, WRITTEN }
@@ -77,15 +78,22 @@ final class OperationData extends SavedData {
         AdapterConfig.Progression progression = AdapterConfig.Progression.CENTER_OUT;
         int shellWidth = 16;
         boolean centralBootstrap = true, centerChunkScheduled;
+        // Missing on old tasks: retain their original shell interpretation and receipt identity.
+        boolean wholeChunk;
+        boolean destroyBedrock;
+        boolean clearedMissingTerrain;
         long phase;
         long cursorOffset;
         transient long replayOffset;
         transient ChunkCursor phaseCursor;
         transient ChunkCursor.Checkpoint restoredCursor;
+        transient CenterOutChunkCursor centerCursor;
+        transient CenterOutChunkCursor.Checkpoint restoredCenterCursor;
         transient Volume activeVolume;
         transient String cachedIntentHash;
         transient ServerLevel owner;
         transient boolean needsChunkPacket;
+        transient long authoritativeLightThrough;
         transient java.util.concurrent.CompletableFuture<Void> queuedLightWork = java.util.concurrent.CompletableFuture.completedFuture(null);
         transient java.util.BitSet sectionSelection;
         transient int selectionSectionY = Integer.MIN_VALUE;
@@ -100,6 +108,7 @@ final class OperationData extends SavedData {
         transient org.voxelregion.propagation.FrozenOcclusion occlusion = org.voxelregion.propagation.FrozenOcclusion.none();
         final it.unimi.dsi.fastutil.longs.LongOpenHashSet excludedChunks = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
         long skippedUnloaded, bulkSections, generatedSkipped;
+        long committedChunks, chunkCommitNanos;
         State state = State.FUSE;
         String message = "";
         int fuse;
@@ -131,10 +140,10 @@ final class OperationData extends SavedData {
         boolean terminal() { return state == State.CANCELLED || state == State.WRITTEN || state == State.FAILED; }
         boolean active() { return state == State.FUSE || state == State.RUNNING || state == State.SETTLING || state == State.RECOVERING; }
 
-        long phaseCount() { return progression == AdapterConfig.Progression.AS_FAST_AS_POSSIBLE ? 1 : centralBootstrap ? 1 + (radius - 1L + shellWidth - 1) / shellWidth : Math.max(1, (radius + (long) shellWidth - 1) / shellWidth); }
+        long phaseCount() { return wholeChunk || progression == AdapterConfig.Progression.AS_FAST_AS_POSSIBLE ? 1 : centralBootstrap ? 1 + (radius - 1L + shellWidth - 1) / shellWidth : Math.max(1, (radius + (long) shellWidth - 1) / shellWidth); }
         Volume phaseVolume(int minY, int maxY) {
             if (activeVolume == null) {
-                activeVolume = progression == AdapterConfig.Progression.AS_FAST_AS_POSSIBLE ? volume
+                activeVolume = wholeChunk || progression == AdapterConfig.Progression.AS_FAST_AS_POSSIBLE ? volume
                     : new SphereShell(Point3.of(cx, cy, cz), phase == 0 ? -1 : (centralBootstrap ? 1 + (phase - 1) * shellWidth : phase * shellWidth) * 2L,
                             Math.min(radius * 2L, (centralBootstrap ? (phase == 0 ? 1 : 1 + phase * shellWidth) : (phase + 1) * shellWidth) * 2L), minY, maxY);
                 if (geometry != null && activeVolume != volume) activeVolume = org.voxelregion.geometry.Volumes.intersection(volume, activeVolume);
@@ -149,6 +158,9 @@ final class OperationData extends SavedData {
                     + "|" + generate + "|" + clearFluids + "|" + resistance + "|" + entityDamage
                     + "|" + protectEveryClaim + "|" + physics + "|" + progression + "|" + shellWidth
                     + (centralBootstrap ? "|centralBootstrap:1" : "")
+                    + (wholeChunk ? "|wholeChunk:1" : "")
+                    + (destroyBedrock ? "|destroyBedrock:1" : "")
+                    + (clearedMissingTerrain ? "|clearedMissingTerrain:1" : "")
                     + (geometry == null ? "" : "|geometry:" + geometry.canonical())
                     + (propagation == org.voxelregion.propagation.FrozenOcclusion.Mode.NONE ? "" : "|propagation:" + propagation + "|cell:" + occlusionCell);
             try { return cachedIntentHash = java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
@@ -165,6 +177,9 @@ final class OperationData extends SavedData {
             t.putInt("radius", radius); t.putInt("fuse", fuse); t.putBoolean("generate", generate);
             t.putBoolean("clearFluids", clearFluids);
             t.putBoolean("centralBootstrap", centralBootstrap); t.putBoolean("centerChunkScheduled", centerChunkScheduled);
+            t.putBoolean("wholeChunk", wholeChunk);
+            t.putBoolean("destroyBedrock", destroyBedrock);
+            t.putBoolean("clearedMissingTerrain", clearedMissingTerrain);
             t.putString("propagation", propagation.name()); t.putString("frozenHash", frozenHash); t.putInt("occlusionCell", occlusionCell);
             t.putString("progression", progression.name()); t.putInt("shellWidth", shellWidth);
             t.putLong("phase", phase); t.putLong("cursorOffset", cursorOffset); t.putBoolean("chunkSelected", chunkSelected);
@@ -178,11 +193,23 @@ final class OperationData extends SavedData {
                 c.putInt("cx", checkpoint.chunkX()); c.putInt("cz", checkpoint.chunkZ()); c.putBoolean("end", checkpoint.exhausted());
                 t.put("chunkCursor", c);
             }
+            var centerCheckpoint = centerCursor == null ? restoredCenterCursor : centerCursor.checkpoint();
+            if (centerCheckpoint != null) {
+                CompoundTag c = new CompoundTag();
+                c.putInt("version", centerCheckpoint.formatVersion());
+                IntBox b = centerCheckpoint.clippedBounds();
+                c.putIntArray("bounds", new int[] {b.minX(), b.minY(), b.minZ(), b.maxX(), b.maxY(), b.maxZ()});
+                c.putLongArray("center", new long[] {centerCheckpoint.center().x2(), centerCheckpoint.center().y2(), centerCheckpoint.center().z2()});
+                c.putInt("x", centerCheckpoint.lastChunkX()); c.putInt("z", centerCheckpoint.lastChunkZ());
+                c.putBoolean("started", centerCheckpoint.started()); c.putBoolean("end", centerCheckpoint.exhausted());
+                t.put("centerCursor", c);
+            }
             t.putBoolean("recovering", recovering); t.putBoolean("resumeRequiresValidation", resumeRequiresValidation);
             t.putInt("unconfirmedFences", unconfirmedFences);
             long[] exclusions = excludedChunks.toLongArray(); java.util.Arrays.sort(exclusions);
             t.putLongArray("excludedChunks", exclusions);
             t.putLong("generatedSkipped", generatedSkipped); t.putLong("skippedUnloaded", skippedUnloaded); t.putLong("bulkSections", bulkSections);
+            t.putLong("committedChunks", committedChunks); t.putLong("chunkCommitNanos", chunkCommitNanos);
             t.putDouble("resistance", resistance); t.putDouble("entityDamage", entityDamage);
             t.putBoolean("protectEveryClaim", protectEveryClaim);
             t.putString("physics", physics.name());
@@ -203,6 +230,9 @@ final class OperationData extends SavedData {
             if (t.contains("geometry", Tag.TAG_COMPOUND)) { job.geometry = org.voxelregion.forge.RegionGeometry.load(t.getCompound("geometry")); job.volume = job.geometry.volume(); }
             job.state = State.valueOf(t.getString("state")); job.message = t.getString("message");
             job.centralBootstrap = t.getBoolean("centralBootstrap"); job.centerChunkScheduled = t.getBoolean("centerChunkScheduled");
+            job.wholeChunk = t.getBoolean("wholeChunk");
+            job.destroyBedrock = t.getBoolean("destroyBedrock");
+            job.clearedMissingTerrain = t.getBoolean("clearedMissingTerrain");
             job.propagation = t.contains("propagation") ? org.voxelregion.propagation.FrozenOcclusion.Mode.valueOf(t.getString("propagation")) : org.voxelregion.propagation.FrozenOcclusion.Mode.NONE;
             job.occlusionCell = t.contains("occlusionCell") ? t.getInt("occlusionCell") : 4;
             if (!java.util.Set.of(4, 8, 16).contains(job.occlusionCell)) throw new IllegalArgumentException("Invalid persisted macro cell size");
@@ -217,7 +247,7 @@ final class OperationData extends SavedData {
                 throw new IllegalArgumentException("Invalid persisted wave cursor");
             job.resumeRequiresValidation = t.getBoolean("resumeRequiresValidation");
             job.unconfirmedFences = t.getInt("unconfirmedFences");
-            if (job.unconfirmedFences < 0 || job.unconfirmedFences > 8)
+            if (job.unconfirmedFences < 0 || job.unconfirmedFences > 512)
                 throw new IllegalArgumentException("Invalid in-flight chunk evidence count");
             job.chunkSelected = t.getBoolean("chunkSelected"); job.recovering = t.getBoolean("recovering");
             if (t.contains("chunkCursor", Tag.TAG_COMPOUND)) {
@@ -226,10 +256,18 @@ final class OperationData extends SavedData {
                 job.restoredCursor = new ChunkCursor.Checkpoint(c.getInt("version"), new IntBox(b[0], b[1], b[2], b[3], b[4], b[5]),
                         c.getInt("rx"), c.getInt("rz"), c.getInt("cx"), c.getInt("cz"), c.getBoolean("end"));
             }
+            if (t.contains("centerCursor", Tag.TAG_COMPOUND)) {
+                CompoundTag c = t.getCompound("centerCursor"); int[] b = c.getIntArray("bounds"); long[] center = c.getLongArray("center");
+                if (!job.wholeChunk || b.length != 6 || center.length != 3) throw new IllegalArgumentException("Invalid center cursor");
+                job.restoredCenterCursor = new CenterOutChunkCursor.Checkpoint(c.getInt("version"),
+                        new IntBox(b[0], b[1], b[2], b[3], b[4], b[5]), new Point3(center[0], center[1], center[2]),
+                        c.getInt("x"), c.getInt("z"), c.getBoolean("started"), c.getBoolean("end"));
+            }
             long[] excluded = t.getLongArray("excludedChunks");
             if (excluded.length > 2_000_000) throw new IllegalArgumentException("Too many excluded chunks");
             for (long position : excluded) job.excludedChunks.add(position);
             job.generatedSkipped = t.getLong("generatedSkipped"); job.skippedUnloaded = t.getLong("skippedUnloaded"); job.bulkSections = t.getLong("bulkSections");
+            job.committedChunks = t.getLong("committedChunks"); job.chunkCommitNanos = t.getLong("chunkCommitNanos");
             job.chunkX = t.getInt("chunkX"); job.chunkZ = t.getInt("chunkZ"); job.voxel = t.getInt("voxel");
             job.chunkStarted = t.getBoolean("chunkStarted"); job.entitiesHandled = t.getBoolean("entitiesHandled");
             job.visited = t.getLong("visited"); job.changed = t.getLong("changed"); job.kept = t.getLong("kept");

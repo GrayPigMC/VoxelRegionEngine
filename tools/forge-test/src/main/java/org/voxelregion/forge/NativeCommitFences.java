@@ -14,12 +14,11 @@ import net.minecraft.world.level.chunk.storage.IOWorker;
 
 /** Bounded, nonblocking native lighting, terrain and POI persistence barriers. World access stays on the server thread. */
 public final class NativeCommitFences {
-    private static final int MAX_PENDING = 32;
-    private static final int MAX_BATCH = 8;
-    private static final List<Request> pending = new ArrayList<>();
-    private static CompletableFuture<Void> batch;
+    private static final int MAX_PENDING = 4096;
+    private static final int MAX_BATCH = 1024;
+    private static final List<Request> pending = new java.util.LinkedList<>();
     private static List<Request> active = List.of();
-    private static long generation;
+    private static final List<SaveBatch> batches = new ArrayList<>();
 
     public static CompletableFuture<Void> light(ServerLevel level, LevelChunk chunk) {
         requireOwner(level.getServer());
@@ -39,9 +38,13 @@ public final class NativeCommitFences {
         public CompletableFuture<Void> saved() { return request.result; }
     }
     public static SaveFence enqueueSave(ServerLevel level, LevelChunk chunk) {
+        return enqueueSave(level, chunk, CompletableFuture.completedFuture(null));
+    }
+    /** Do not serialize or acknowledge native light until the caller's custom light work has completed. */
+    public static SaveFence enqueueSave(ServerLevel level, LevelChunk chunk, CompletableFuture<Void> prerequisite) {
         requireOwner(level.getServer());
         if (pending.size() + active.size() >= MAX_PENDING) throw new IllegalStateException("Native save queue capacity reached");
-        Request request = new Request(level, chunk);
+        Request request = new Request(level, chunk, prerequisite);
         pending.add(request);
         return new SaveFence(request);
     }
@@ -54,17 +57,19 @@ public final class NativeCommitFences {
 
     public static void tick(MinecraftServer server, long deadline) {
         requireOwner(server);
-        if (batch != null && !batch.isDone()) return;
-        if (batch != null) {
+        var completed = batches.iterator();
+        while (completed.hasNext()) {
+            SaveBatch group = completed.next();
+            if (!group.completion.isDone()) continue;
             Throwable failure = null;
-            try { batch.join(); } catch (RuntimeException ex) { failure = ex; }
-            for (Request request : active) {
+            try { group.completion.join(); } catch (RuntimeException ex) { failure = ex; }
+            for (Request request : group.requests) {
                 if (failure == null) request.result.complete(null);
                 else { request.chunk.setUnsaved(true); request.result.completeExceptionally(failure); }
             }
-            active = List.of();
+            completed.remove();
         }
-        batch = null;
+        refreshBatches();
         List<Request> selected = new ArrayList<>();
         List<CompletableFuture<Void>> writes = new ArrayList<>();
         Set<IOWorker> workers = new LinkedHashSet<>();
@@ -75,6 +80,11 @@ public final class NativeCommitFences {
             boolean detached = false;
             try {
                 request.light.join(); // Already complete; never blocks the server thread.
+                if (request.waitingPrerequisite) {
+                    request.waitingPrerequisite = false;
+                    request.awaitCurrentLight();
+                    continue;
+                }
                 if (request.level.getChunkSource().getChunkNow(request.chunk.getPos().x, request.chunk.getPos().z) != request.chunk)
                     throw new IllegalStateException("Chunk ticket was released before its save fence");
                 if (revision(request.chunk) != request.epoch) {
@@ -106,11 +116,13 @@ public final class NativeCommitFences {
             }
         }
         if (selected.isEmpty()) return;
-        active = List.copyOf(selected);
         // Capture individual futures before the barrier: synchronize alone can miss an earlier failed store.
-        batch = CompletableFuture.allOf(writes.toArray(CompletableFuture[]::new))
+        CompletableFuture<Void> completion = CompletableFuture.allOf(writes.toArray(CompletableFuture[]::new))
                 .thenCompose(ignored -> CompletableFuture.allOf(workers.stream()
-                        .map(worker -> worker.synchronize(true)).toArray(CompletableFuture[]::new)));
+                        .map(worker -> worker instanceof NativeAccess.DurableStorage storage
+                                ? storage.vre$flushStored() : worker.synchronize(true)).toArray(CompletableFuture[]::new)));
+        batches.add(new SaveBatch(List.copyOf(selected), completion));
+        refreshBatches();
         // Completion is observed on the server thread on the next tick. No old asynchronous
         // callback can acknowledge a stopped server or mutate a new server's batch.
     }
@@ -122,9 +134,13 @@ public final class NativeCommitFences {
         for (Request request : active) request.result.completeExceptionally(failure);
         pending.clear();
         active = List.of();
-        generation++;
-        batch = null;
+        batches.clear();
     }
+
+    private static void refreshBatches() {
+        active = batches.stream().flatMap(group -> group.requests.stream()).toList();
+    }
+    private record SaveBatch(List<Request> requests, CompletableFuture<Void> completion) {}
 
     private static void requireOwner(MinecraftServer server) {
         if (!server.isSameThread()) throw new IllegalStateException("Native commit fences require the server thread");
@@ -141,10 +157,12 @@ public final class NativeCommitFences {
         final LevelChunk chunk;
         final CompletableFuture<Void> result = new CompletableFuture<>();
         CompletableFuture<Void> light;
+        boolean waitingPrerequisite;
         long epoch;
-        Request(ServerLevel level, LevelChunk chunk) {
+        Request(ServerLevel level, LevelChunk chunk, CompletableFuture<Void> prerequisite) {
             this.level = level; this.chunk = chunk;
-            awaitCurrentLight();
+            if (prerequisite.isDone()) { prerequisite.join(); awaitCurrentLight(); }
+            else { light = prerequisite; waitingPrerequisite = true; }
         }
         void awaitCurrentLight() {
             epoch = revision(chunk);

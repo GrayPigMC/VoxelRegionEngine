@@ -18,6 +18,7 @@ public final class NativeSaveTracker {
         ACTIVE.set(capture);
         return capture;
     }
+    public static boolean capturing() { return ACTIVE.get() != null; }
     public static void stored(IOWorker worker, ChunkPos position, CompletableFuture<Void> result) {
         Capture capture = ACTIVE.get();
         if (capture != null) {
