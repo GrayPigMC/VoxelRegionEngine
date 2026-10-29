@@ -48,6 +48,7 @@ Forge 制品在 `tools/forge-test` 内执行 `../../gradlew adapterJar remapJar`
 
 ## 文档与验证
 
+- [独立 API 使用与参考文档（可单独转发）](docs/API_REFERENCE.zh-CN.md)
 - [算法 API 与调用协议](docs/api.md)
 - [Forge 公开 API、安装与嵌入](docs/forge-embedding.md)
 - [范围实体杀死与清理 API](docs/entity-operations.md)

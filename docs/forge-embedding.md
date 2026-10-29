@@ -91,7 +91,7 @@ var handle = ForgeRegionEngine.submit(level, actorUuid, restored,
 
 ## 批量写入观察者
 
-批量 section 写入只在全部加载模组都有已审核适配时启用。宿主存在逐块事件、区段缓存或保护观察者时，需要审计其替代通知，并在构造阶段注册：
+批量 section 写入要求相关的全局世界变更观察者已有适配，不因无关模组而全局关闭。宿主存在逐块事件、区段缓存或保护观察者时，需要审计其替代通知，并在构造阶段注册：
 
 ```java
 HostIntegration.registerAuditedMod("my_host", new HostIntegration.Observer() {
@@ -102,7 +102,7 @@ HostIntegration.registerAuditedMod("my_host", new HostIntegration.Observer() {
 });
 ```
 
-只有确认宿主没有额外观察需求且相关修改路径有修订号跟踪时才使用空 observer。未知模组使批量提交回退原生路径；非 NONE 快照模式也不能凭未知变更跟踪继续执行。注册声明不证明模组没有 worldgen、retrogen 或其他生成钩子；生成快捷路径仍需要独立安全证明，UNKNOWN 走原生生成。服务端开始后拒绝变更观察者注册表。
+只有确认宿主没有额外观察需求且相关修改路径有修订号跟踪时才使用空 observer。`gtceu` 和 `gtlcore` 的全局观察器在对应模组加载时必须有适配；其他全局变更钩子通过 `HostIntegration.requireMutationObserver(modId)` 声明。未知方块状态仍保留必要的原生回调，非 NONE 快照模式也不能凭未知变更跟踪继续执行。注册声明不证明模组没有 worldgen、retrogen 或其他生成钩子；生成快捷路径仍需要独立安全证明，UNKNOWN 走原生生成。服务端开始后拒绝变更观察者注册表。
 
 ## 持久协议与打包验证
 
