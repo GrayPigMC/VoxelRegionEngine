@@ -1,5 +1,7 @@
 # VoxelRegionEngine
 
+Forge 集成的全局光照组件单独沿用 LGPL-3.0，源码在 `third_party/starlight-forge/`；VRE 自有算法保持 MPL-2.0。接管范围、存档格式和光影/泛光验证边界见 [全局光照说明](docs/global-lighting.md)。
+
 Java 17 的体素区域操作库，采用 MPL-2.0。面向大范围爆炸、开挖和区域清除；算法核心不依赖 Minecraft、Forge、FTB 或 GTLCore。当前版本为 0.1.0，接口处于初始开发期。
 
 仓库包含独立算法库、Forge 1.20.1 适配器和临时测试 mod。运行时已经接入批量区段写入、冻结遮挡、分阶段推进、原生保存确认与基于证据的恢复；这些实现说明不代替最终制品的回归和生产验收。原始需求见 [DESIGN-v0.1.md](DESIGN-v0.1.md)，接口与边界见下列文档。
@@ -42,7 +44,8 @@ Windows 使用 `gradlew.bat`，需要 JDK 17。主库无第三方运行依赖；
 |---|---|
 | `voxel-region-engine-0.1.0.jar` | 纯 Java 算法库，主项目 `build/libs/` |
 | `voxel-region-forge-adapter-1.20.1-0.1.0.jar` | 无 `@Mod` 的 Forge 库，公开 `ForgeRegionEngine`，位于 `tools/forge-test/build/libs/` |
-| `voxel-region-forge-test-1.20.1-0.1.0.jar` | 可调炸药与命令，内嵌 engine 和 adapter 两份 JarJar 库 |
+| `vre-starlight-forge-1.20.1-1.1.2-vre.jar` | LGPL 全局光照组件，位于 `tools/forge-test/build/intermediates/vre/` |
+| `voxel-region-forge-test-1.20.1-0.1.0.jar` | 可调炸药与命令，内嵌 engine、adapter 和光照组件三份 JarJar 库 |
 
 Forge 制品在 `tools/forge-test` 内执行 `../../gradlew adapterJar remapJar` 构建。独立库不注册测试物品或命令；宿主以内嵌依赖接入，无需要求玩家额外安装外挂核心。测试源码、测试结构、验证维度及本地世界不进入正常发布包。
 

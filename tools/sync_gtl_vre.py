@@ -36,6 +36,13 @@ def main() -> None:
     for module in ("vre-engine", "vre-forge"):
         for name in ("LICENSE", "NOTICE"):
             files[f"{module}/{name}"] = source / name
+    # Preserve the independent LGPL component, including its complete source and
+    # provenance. It is never relabelled as part of the MPL portable library.
+    lighting = source / "third_party/starlight-forge"
+    for path in sorted(lighting.rglob("*")):
+        if path.is_file():
+            files[f"vre-starlight/{path.relative_to(lighting).as_posix()}"] = path
+    files["gradle/vre-starlight-packaging.gradle"] = source / "tools/gradle/starlight-packaging.gradle"
 
     digest = hashlib.sha256()
     hashes: dict[str, str] = {}
@@ -56,7 +63,7 @@ def main() -> None:
             old = json.loads(manifest_path.read_text(encoding="utf-8"))
             for name in set(old.get("files", {})) - set(files):
                 obsolete = (target / name).resolve()
-                if not obsolete.is_relative_to(target) or not name.startswith(("vre-engine/", "vre-forge/")):
+                if not obsolete.is_relative_to(target) or not name.startswith(("vre-engine/", "vre-forge/", "vre-starlight/")):
                     raise SystemExit(f"Refusing stale manifest path outside the managed VRE modules: {name}")
                 if obsolete.is_file():
                     obsolete.unlink()

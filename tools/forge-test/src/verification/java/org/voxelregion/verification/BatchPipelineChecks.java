@@ -28,6 +28,7 @@ public final class BatchPipelineChecks {
     public static void verify(Path root) throws Exception {
         Files.createDirectories(root);
         palettes();
+        verifyPackedSelections();
         deferredHeader(root.resolve("header"));
         parallelStores(root.resolve("parallel"));
         verifyDurableFences(root.resolve("durable-fences"));
@@ -59,6 +60,81 @@ public final class BatchPipelineChecks {
             }
             output.set(0, 0, 0, Blocks.GOLD_BLOCK.defaultBlockState());
             check(source.get(0, 0, 0).is(Blocks.DIAMOND_BLOCK), "Output and source must own separate bit storage");
+        }
+    }
+    /** Packed partial clears versus a per-cell oracle, without region-file/IO work. */
+    public static void verifyPackedSelections() {
+        BlockState air = Blocks.AIR.defaultBlockState();
+        var values = new ArrayList<BlockState>();
+        for (var state : Block.BLOCK_STATE_REGISTRY) {
+            if (!state.isAir()) values.add(state);
+            if (values.size() == 257) break;
+        }
+        check(values.size() == 257, "Fixture needs palette-width and global-palette boundaries");
+        var random = new Random(0x371A11);
+        var masks = new ArrayList<BitSet>();
+        masks.add(new BitSet());
+        BitSet ends = new BitSet(4096);
+        for (int index : new int[]{0, 1, 11, 12, 15, 16, 63, 64, 65, 255, 256, 4094, 4095}) ends.set(index);
+        masks.add(ends);
+        BitSet all = new BitSet(4096); all.set(0, 4096); masks.add(all);
+        for (int round = 0; round < 4; round++) {
+            var mask = new BitSet(4096);
+            for (int i = 0; i < 4096; i++) if (random.nextInt(8) <= round) mask.set(i);
+            masks.add(mask);
+        }
+        var codec = PalettedContainer.codecRW(Block.BLOCK_STATE_REGISTRY, BlockState.CODEC,
+                PalettedContainer.Strategy.SECTION_STATES, air);
+        for (int size : new int[]{1, 2, 15, 16, 17, 31, 32, 63, 64, 127, 128, 255, 256, 257}) {
+            for (boolean includeAir : new boolean[]{false, true}) {
+                var source = new PalettedContainer<>(Block.BLOCK_STATE_REGISTRY,
+                        includeAir ? air : values.get(0), PalettedContainer.Strategy.SECTION_STATES);
+                var expected = new BlockState[4096];
+                for (int i = 0; i < 4096; i++) {
+                    // First use every entry, then randomize the rest independently of packed word boundaries.
+                    int id = i < size ? i : random.nextInt(size);
+                    var state = includeAir ? id == 0 ? air : values.get(id - 1) : values.get(id);
+                    expected[i] = state; source.set(i & 15, i >>> 8, (i >>> 4) & 15, state);
+                }
+                var image = NativePaletteImage.capture(source);
+                if (size > 256) {
+                    check(image == null, "Global palette must keep the ordinary fallback");
+                    continue;
+                }
+                check(image != null, "Local palette capture failed at size " + size);
+                boolean canAddAir = includeAir || image.states.size() < (1 << image.indices.getBits());
+                for (BitSet mask : masks) {
+                    BitSet selected = (BitSet) mask.clone();
+                    var output = image.clear(selected);
+                    if (!selected.isEmpty() && !canAddAir) {
+                        check(output == null, "Full/zero-bit palette must not invent a wider storage layout");
+                        continue;
+                    }
+                    check(output != null, "Existing or appendable AIR must support packed clearing");
+                    selected.flip(0, 4096); // The output must not retain a mutable caller mask.
+                    var encoded = codec.encodeStart(NbtOps.INSTANCE, output).result().orElseThrow();
+                    var decoded = codec.parse(NbtOps.INSTANCE, encoded).result().orElseThrow();
+                    for (int i = 0; i < 4096; i++) {
+                        var wanted = mask.get(i) ? air : expected[i];
+                        check(output.get(i & 15, i >>> 8, (i >>> 4) & 15) == wanted,
+                                "Packed clear differs from per-cell oracle or changed an unselected value");
+                        check(decoded.get(i & 15, i >>> 8, (i >>> 4) & 15) == wanted,
+                                "Native codec changed a packed partial clear");
+                        check(source.get(i & 15, i >>> 8, (i >>> 4) & 15) == expected[i],
+                                "Packed clear modified the source container");
+                    }
+                    output.set(0, 0, 0, Blocks.DIAMOND_BLOCK.defaultBlockState());
+                    check(image.indices.get(0) == image.states.indexOf(expected[0]),
+                            "Output mutation aliased the captured packed indices");
+                }
+                source.set(0, 0, 0, Blocks.GOLD_BLOCK.defaultBlockState());
+                var unchanged = image.clear(new BitSet());
+                check(unchanged != null && unchanged.get(0, 0, 0) == expected[0],
+                        "Source mutation aliased the captured image");
+                var invalid = new BitSet(); invalid.set(4096);
+                try { image.clear(invalid); throw new AssertionError("Out-of-section selection was accepted"); }
+                catch (IllegalArgumentException expectedFailure) { }
+            }
         }
     }
     private static void deferredHeader(Path directory) throws Exception {

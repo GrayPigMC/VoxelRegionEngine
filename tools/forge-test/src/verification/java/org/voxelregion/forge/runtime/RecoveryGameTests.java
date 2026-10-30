@@ -20,6 +20,38 @@ public final class RecoveryGameTests {
     private static final String HASH = "immutable-geometry-and-policy-fixture-v1";
 
     @GameTest(template = "empty", batch = "vre_receipt_protocol", timeoutTicks = 100)
+    public static void fullPipelineWindowSurvivesReloadWithoutAuthorizingReplay(GameTestHelper helper) {
+        for (int pending : new int[] {0, 512, 513, 1024, 4096}) {
+            var task = new OperationData.Task(UUID.randomUUID(), UUID.randomUUID(), .5, 64.5, .5,
+                    64, 0, true, true, 6000, 0, false, AdapterConfig.Physics.NONE, -4);
+            task.wholeChunk = true;
+            task.phase = 1;
+            task.state = OperationData.State.SETTLING;
+            task.unconfirmedFences = pending;
+            OperationData data = new OperationData();
+            data.tasks.add(task);
+            OperationData restored = OperationData.load(data.save(new CompoundTag()));
+            helper.assertTrue(restored.tasks.size() == 1,
+                    "A valid " + pending + "-chunk window must retain its operation record on reload");
+            var recovered = restored.tasks.get(0);
+            helper.assertTrue(recovered.id.equals(task.id) && recovered.unconfirmedFences == pending,
+                    "Reload preserves the exact identity and pending-write evidence");
+            helper.assertTrue(recovered.state == (pending == 0
+                            ? OperationData.State.RECOVERING : OperationData.State.PAUSED_RECOVERY),
+                    "Pending writes require evidence inspection rather than silently completing or replaying");
+            for (int invalid : new int[] {-1, 4097}) {
+                CompoundTag malformed = task.save();
+                malformed.putInt("unconfirmedFences", invalid);
+                boolean rejected = false;
+                try { OperationData.Task.load(malformed); }
+                catch (IllegalArgumentException expected) { rejected = true; }
+                helper.assertTrue(rejected, "Invalid pending-write count remains rejected: " + invalid);
+            }
+        }
+        helper.succeed();
+    }
+
+    @GameTest(template = "empty", batch = "vre_receipt_protocol", timeoutTicks = 100)
     public static void detailedReceiptsKeepPhaseAndWriteEvidence(GameTestHelper helper) {
         UUID id = UUID.randomUUID();
         ChunkReceipts receipts = new ChunkReceipts();

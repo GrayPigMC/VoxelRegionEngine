@@ -2,7 +2,7 @@
 
 This project builds the reusable Forge adapter and a small mod providing test commands and an adjustable charge. It targets Java 17, Minecraft 1.20.1 and ordinary Forge. Hybrid server cores are outside the contract. GTLCore embedding is documented in the library's integration guide.
 
-Runtime code lives in `org.voxelregion.forge.runtime`; hosts call `org.voxelregion.forge.ForgeRegionEngine`. The separate adapter jar has no `@Mod`. The test mod embeds both the adapter and independent Java engine through JarJar. All three artifacts use MPL-2.0. Verification classes, test structures and verification dimensions are excluded from normal artifacts, including artifacts built after a verification compile.
+Runtime code lives in `org.voxelregion.forge.runtime`; hosts call `org.voxelregion.forge.ForgeRegionEngine`. The separate adapter jar has no `@Mod`. The test mod embeds the adapter, independent Java engine and global lighting component through JarJar. VRE-owned code uses MPL-2.0; the separate Starlight-derived component uses LGPL-3.0 and keeps its own source and notices in `third_party/starlight-forge`. Verification classes, test structures and verification dimensions are excluded from normal artifacts, including artifacts built after a verification compile.
 
 ## Build and run
 

@@ -8,17 +8,20 @@
 |---|---|
 | 纯 Java engine jar | 几何、规划、遮挡与预算等 Minecraft 无关类型 |
 | `voxel-region-forge-adapter-1.20.1-0.1.0.jar` | Forge 公开 API、运行时与版本专用 mixin；`FMLModType=GAMELIBRARY`，没有 `@Mod` 注册 |
-| `voxel-region-forge-test-1.20.1-0.1.0.jar` | 临时验证物品与命令，JarJar 内嵌上述两份库 |
+| `vre-starlight-forge-1.20.1-1.1.2-vre.jar` | 全局光照组件，单独采用 LGPL-3.0；产物位于 `build/intermediates/vre/` |
+| `voxel-region-forge-test-1.20.1-0.1.0.jar` | 临时验证物品与命令，JarJar 内嵌上述三份库 |
 
-在 `tools/forge-test` 执行 `../../gradlew adapterJar remapJar` 生成两个 Forge 制品。`adapterDevelopmentJar` 产生命名空间为 named 的开发制品；`adapterJar` 的类经过 SRG remap，用于标准 Forge 启动。宿主应通过自己的 Forge 构建工具提供正确的开发映射依赖，并将发布版 adapter 和 engine 作为 JarJar 库收纳。不要同时把独立 adapter、engine 和已经内嵌它们的测试模组重复打入宿主。
+在 `tools/forge-test` 执行 `../../gradlew adapterJar remapJar verifyPackagedVreStarlight` 生成并检查 Forge 制品。`adapterDevelopmentJar` 产生命名空间为 named 的开发制品；`adapterJar` 和 `vreStarlightJar` 经过 SRG remap，用于标准 Forge 启动。宿主应通过自己的 Forge 构建工具提供正确的开发映射依赖，并将发布版 adapter、engine 和全局光照组件作为三份 JarJar 库收纳。不要同时嵌入已经包含它们的测试模组。
 
 宿主 jar 的 `META-INF/MANIFEST.MF` 必须在启动阶段声明：
 
 ```text
-MixinConfigs: voxelregion-forge.mixins.json,voxelregion-receipts.mixins.json
+MixinConfigs: voxelregion-forge.mixins.json,voxelregion-receipts.mixins.json,vre-starlight.mixins.json
 ```
 
-两个配置及 `voxelregion-forge.refmap.json` 位于 adapter jar 内。`install` 注册 Forge 事件和配置，不能在世界启动后补装 mixin。提交操作前会检查原生保存、光照和区块变更 hook；缺少 hook 时拒绝接受任务。
+前两个配置及 `voxelregion-forge.refmap.json` 位于 adapter jar 内；第三个配置和 `vre-starlight.refmap.json` 位于独立光照组件内。宿主还须合并该组件的 `META-INF/accesstransformer.cfg`，并在开发环境应用同一组 AT。仓库的 `tools/gradle/starlight-packaging.gradle` 实现了编译、独立映射、JarJar 和检查任务；手动接入时不能仅复制 adapter 和 engine。
+
+全局光照默认在客户端和服务端启动阶段接管，包含普通世界运行；不依赖先提交区域任务。它不能与另一份 Starlight 或其他替换同一光照实现的模组同时加载。范围、开关和验证边界见 [全局光照说明](global-lighting.md)。`install` 注册 Forge 事件和配置，不能在世界启动后补装 mixin。提交操作前会检查原生保存、光照和区块变更 hook；缺少 hook 时拒绝接受任务。
 
 在宿主的 `@Mod` 构造阶段调用：
 

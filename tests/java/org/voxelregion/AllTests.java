@@ -11,6 +11,10 @@ public final class AllTests {
         CursorCheckpointTest.main(args);
         CenterOutChunkCursorTest.main(args);
         ClearedChunkLightingTest.main(args);
+        OpticalChunkLightingTest.main(args);
+        GeneralChunkLightingTest.main(args);
+        GeneralLightQueueTest.main(args);
+        SpatialTaskSchedulerTest.main(args);
         OpenRegionLightingTest.main(args);
         CompletionWindowTest.main(args);
         PreparationWindowTest.main(args);

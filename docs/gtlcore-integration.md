@@ -72,17 +72,19 @@ GTCEu `1.4.4` 的准确 `OreBlock` 类、非沙质矿石注册了静态删除证
 
 ## 自包含构建与快照
 
-GTLCore 保存 `vre-engine` 的便携源码和 `vre-forge` 的 Forge 源码。构建不依赖旁边存在 VoxelRegionEngine 工作树，也不下载临时测试模组作为前提。维护者在库源码稳定后同步：
+GTLCore 保存 `vre-engine` 的便携源码、`vre-forge` 的 Forge 源码，以及 `vre-starlight` 的独立 LGPL 全局光照源码。构建不依赖旁边存在 VoxelRegionEngine 工作树，也不下载临时测试模组作为前提。维护者在库源码稳定后同步：
 
 ```text
 python tools/sync_gtl_vre.py --core <authorized-GTLCore-checkout> --apply
 ```
 
-不加 `--apply` 只显示待同步快照。`vre-vendor.json` 记录源 revision、dirty 标记、整体 SHA-256 和每个文件的内容哈希；同步工具只管理两份 VRE 源模块，保留宿主 API 和构建桥接。
+不加 `--apply` 只显示待同步快照。`vre-vendor.json` 记录源 revision、dirty 标记、整体 SHA-256 和每个文件的内容哈希；同步工具管理三份源模块和 `gradle/vre-starlight-packaging.gradle`，保留宿主 API 与其他构建桥接。
 
-宿主一次编译 adapter，再单独 remap 为 SRG Jar-in-Jar 库。adapter 使用从宿主编译结果中提取的独立 `voxelregion-forge.refmap.json`，不混入 GTLCore refmap 条目。外层 GTLCore 仅保留宿主代码和策略资源，避免重复打包 `org.voxelregion` 类。MPL-2.0 许可证和 NOTICE 随两个库保留。
+宿主一次编译 adapter 和光照组件，再分别 remap 为 SRG Jar-in-Jar 库。adapter 使用独立 `voxelregion-forge.refmap.json`，光照组件使用 `vre-starlight.refmap.json`，均从宿主编译结果按包提取。外层 GTLCore 保留宿主代码、策略资源和全局光照 AT，避免重复打包 `org.voxelregion` 或 `ca.spottedleaf.starlight` 类。两份 VRE 库保留 MPL-2.0 许可证；独立光照库保留 LGPL-3.0、NOTICE、UPSTREAM 来源与修改后对应源码。
 
-在 GTLCore 工作树运行 `build` 会执行 `verifyPackagedVre`，检查 adapter API、两份 mixin 配置、独立 refmap、两份内嵌库和测试内容隔离。临时验证源只在 `-PvreVerification` 下启用：
+GTLCore 的正式 JAR 输出到 `build/libs/`；用于内嵌的 adapter 和其开发映射中间产物输出到 `build/intermediates/vre/`。安装时只需要正式 GTLCore JAR，不应再额外安装这些中间产物。旧构建遗留在 `build/libs/` 的辅助 JAR 不会随目录配置变化自动消失，重新打包时应区分旧文件或先执行 `clean`。
+
+在 GTLCore 工作树运行 `build` 会执行 `verifyPackagedVre` 及其 `verifyPackagedVreStarlight` 依赖，检查 adapter API、三份 mixin 配置、独立 refmap、三份内嵌库、AT、许可证与测试内容隔离。全局组件默认覆盖普通世界运行，详见 [全局光照说明](global-lighting.md)。临时验证源只在 `-PvreVerification` 下启用：
 
 ```text
 gradlew.bat runVreGameTest -PvreVerification -PvreVerificationRunDirectory=<isolated-run-directory> -PvreVerificationRuntimeDir=<local-verification-jars> --max-workers=1

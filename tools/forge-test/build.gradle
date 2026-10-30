@@ -9,6 +9,9 @@ java {
     sourceCompatibility = targetCompatibility = JavaVersion.VERSION_17
 }
 repositories { mavenCentral() }
+ext.vreStarlightRoot = '../../third_party/starlight-forge'
+ext.vreStarlightParentRefmap = 'voxelregion-forge.refmap.json'
+apply from: '../gradle/starlight-packaging.gradle'
 loom {
     silentMojangMappingsLicense()
     mixin.defaultRefmapName = 'voxelregion-forge.refmap.json'

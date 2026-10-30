@@ -1,6 +1,6 @@
 # VoxelRegionEngine API 使用与参考
 
-适用版本：**VoxelRegionEngine 0.1.0 / Java 17 / Minecraft 1.20.1 Forge 适配器**。适配器构建依赖 Forge 47.3.7；其他 Forge 构建及模组组合需要由宿主验证。项目许可证为 MPL-2.0。仓库：<https://github.com/GrayPigMC/VoxelRegionEngine>。
+适用版本：**VoxelRegionEngine 0.1.0 / Java 17 / Minecraft 1.20.1 Forge 适配器**。适配器构建依赖 Forge 47.3.7；其他 Forge 构建及模组组合需要由宿主验证。自有算法和适配器采用 MPL-2.0，独立全局光照组件采用 LGPL-3.0。仓库：<https://github.com/GrayPigMC/VoxelRegionEngine>。
 
 本文是可单独分发的接入文档，覆盖地形清理、实体清理、几何、状态与持久化。API 仍处于初始开发期，升级时应核对签名和持久化协议。
 
@@ -33,19 +33,22 @@ gradlew.bat build
 | `build/libs/voxel-region-engine-0.1.0.jar` | 无 Minecraft 依赖的算法库 |
 | `tools/forge-test/build/libs/voxel-region-forge-adapter-1.20.1-0.1.0.jar` | 发布用 Forge 适配器，SRG 映射，内含适配 mixin |
 | `tools/forge-test/build/libs/voxel-region-forge-adapter-1.20.1-0.1.0-dev.jar` | named 开发制品，由 `adapterDevelopmentJar` 任务生成 |
-| `tools/forge-test/build/libs/voxel-region-forge-test-1.20.1-0.1.0.jar` | 临时测试模组，内嵌 engine 与 adapter；正式宿主无需它 |
+| `tools/forge-test/build/intermediates/vre/vre-starlight-forge-1.20.1-1.1.2-vre.jar` | LGPL-3.0 全局光照组件，SRG 映射 |
+| `tools/forge-test/build/libs/voxel-region-forge-test-1.20.1-0.1.0.jar` | 临时测试模组，内嵌 engine、adapter 与光照组件；正式宿主无需它 |
 
 纯 Java 工程可使用本地 jar，或在本仓库执行 `publishToMavenLocal`，然后依赖 `org.voxelregion:voxel-region-engine:0.1.0`。该命令只发布到本机 Maven 仓库，不代表存在公共 Maven 下载源。
 
-Forge 宿主应将 **engine 和发布用 adapter 两份库**作为 Forge JarJar 库随宿主交付，并用自己构建工具的映射支持配置编译依赖。两份库以 `FMLModType=GAMELIBRARY` 交付；adapter 不含独立 `@Mod` 入口。不要将开发映射 jar 直接当发布 jar，也不要同时嵌入已经包含它们的测试模组造成重复类。
+Forge 宿主应将 **engine、发布用 adapter 和全局光照组件三份库**作为 Forge JarJar 库随宿主交付，并用自己构建工具的映射支持配置编译依赖。三份库以 `FMLModType=GAMELIBRARY` 交付；adapter 与光照组件不含独立 `@Mod` 入口。不要将开发映射 jar 直接当发布 jar，也不要同时嵌入已经包含它们的测试模组造成重复类。光照组件单独保留 LGPL 许可证、NOTICE 和修改后的对应源码；VRE 自有部分继续采用 MPL。
 
-宿主 `META-INF/MANIFEST.MF` 必须包含以下两个配置；已有宿主 mixin 配置时合并列表：
+宿主 `META-INF/MANIFEST.MF` 必须包含以下三个配置；已有宿主 mixin 配置时合并列表：
 
 ```text
-MixinConfigs: voxelregion-forge.mixins.json,voxelregion-receipts.mixins.json
+MixinConfigs: voxelregion-forge.mixins.json,voxelregion-receipts.mixins.json,vre-starlight.mixins.json
 ```
 
-两个配置与 `voxelregion-forge.refmap.json` 在 adapter 内，打包时需保留。在宿主 `@Mod` 构造阶段安装：
+前两个配置与 `voxelregion-forge.refmap.json` 在 adapter 内；第三个配置与 `vre-starlight.refmap.json` 在光照组件内。宿主须将光照组件的 `META-INF/accesstransformer.cfg` 合并到自己的 AT，并在编译环境应用它。可参考仓库 `tools/gradle/starlight-packaging.gradle`；仅嵌入旧版两份库不足以启动当前适配器。
+
+光照组件默认接管普通世界和区域任务的客户端、服务端光照。不要同时安装另一份 Starlight 或其他替换相同光照实现的模组。启动参数 `-Dvre.globalLighting=false` 可用于重启后的原生对照；不能在世界运行中切换。在宿主 `@Mod` 构造阶段安装区域运行时：
 
 ```java
 import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
@@ -124,9 +127,12 @@ public final class RegionActions {
 | `submit(ServerLevel, UUID actor, RegionGeometry, Options)` | 通用几何任务 `Handle`，可能抛出 `IOException` |
 | `status(ServerLevel, UUID id)` | `Optional<Status>`，不存在时为空 |
 | `statuses(ServerLevel)` | 本维度任务的 `List<Status>` 快照 |
+| `inspectChunk(ServerLevel, BlockPos)` | 当前区块的只读 `List<String>` 诊断文本，不加载未加载区块，不修改地形或序列化全量区块 NBT |
 | `control(ServerLevel, UUID id, Control)` | `ControlResult`：动作是否应用、最新状态和拒绝原因 |
 
 `Handle` 包含 `dimension()` 与 `id()`；查询和控制必须使用对应维度的 `ServerLevel`。不要把客户端保存的 UUID 当成操作授权。
+
+`inspectChunk` 必须在服务器线程调用。返回独立、不可变的人读文本，**不是稳定机器解析格式**；最多显示 16 条几何相交任务或当前区块已有回执，超限会标明截断。包含块中心几何判定、整列覆盖分类、当前加载状态、快清标记、修订号及回执；未加载区块不会为了诊断而读盘或加载。操作元数据只读取现有缓存或保存数据，不创建任务表、不触发 intent journal 恢复核对、不标脏；只有 journal 而尚未恢复进任务表的记录可能不在输出中。已清理出任务列表但仍有回执的记录显示 `task=NOT_RETAINED`。`NO_RECEIPT`、不可用证据或未保留排除记录都不能推断为跳过；单区块 `COMPLETE` 回执也不等于整单 `WRITTEN`。修订号不同只说明发生过后续变化，不推断为世界生成覆盖。Core 提供 `/gtlregion inspect [chunkX chunkZ]`；省略坐标检查当前位置，指定坐标使用该列中心与执行者当前 Y，输出同时写入服务端日志。
 
 ## 5. 几何、坐标和序列化
 
@@ -354,7 +360,7 @@ SectionPlan planSection(Volume volume, SectionKey key, long revision,
 
 ## 11. 接入验收要点
 
-1. 最终 jar 同时包含 engine、正确映射的 adapter、两个 mixin 配置、refmap 和许可证；不依赖临时测试模组。
+1. 最终 jar 包含 engine、正确映射的 adapter 与独立光照组件、三份 mixin 配置、各自 refmap、AT 和各组件许可证；不依赖临时测试模组。
 2. 在真实宿主环境检查地形与实体两套 API，确认权限、保护、流体、基岩和容器行为符合宿主策略。
 3. 对地形等待 `WRITTEN` 后正常保存并重新加载确认结果；实体 `APPLIED` 不能代替保存屏障。
 4. 检查暂停、取消和重启后的证据不足状态，不能通过直接改游标或强制 resume 清除保护。
