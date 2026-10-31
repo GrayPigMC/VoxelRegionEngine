@@ -8,20 +8,19 @@
 |---|---|
 | 纯 Java engine jar | 几何、规划、遮挡与预算等 Minecraft 无关类型 |
 | `voxel-region-forge-adapter-1.20.1-0.1.0.jar` | Forge 公开 API、运行时与版本专用 mixin；`FMLModType=GAMELIBRARY`，没有 `@Mod` 注册 |
-| `vre-starlight-forge-1.20.1-1.1.2-vre.jar` | 全局光照组件，单独采用 LGPL-3.0；产物位于 `build/intermediates/vre/` |
-| `voxel-region-forge-test-1.20.1-0.1.0.jar` | 临时验证物品与命令，JarJar 内嵌上述三份库 |
+| `voxel-region-forge-test-1.20.1-0.1.0.jar` | 临时验证物品与命令，JarJar 内嵌上述两份库 |
 
-在 `tools/forge-test` 执行 `../../gradlew adapterJar remapJar verifyPackagedVreStarlight` 生成并检查 Forge 制品。`adapterDevelopmentJar` 产生命名空间为 named 的开发制品；`adapterJar` 和 `vreStarlightJar` 经过 SRG remap，用于标准 Forge 启动。宿主应通过自己的 Forge 构建工具提供正确的开发映射依赖，并将发布版 adapter、engine 和全局光照组件作为三份 JarJar 库收纳。不要同时嵌入已经包含它们的测试模组。
+在 `tools/forge-test` 执行 `../../gradlew clean adapterJar remapJar` 生成 Forge 制品。`adapterDevelopmentJar` 产生命名空间为 named 的开发制品；`adapterJar` 经过 SRG remap，用于标准 Forge 启动。宿主应通过自己的 Forge 构建工具提供正确的开发映射依赖，并将发布版 adapter 与 engine 作为两份 JarJar 库收纳。不要同时嵌入已经包含它们的测试模组。移除旧光照组件后必须先 clean，防止增量构建重新打入旧类、资源和 AT。
 
 宿主 jar 的 `META-INF/MANIFEST.MF` 必须在启动阶段声明：
 
 ```text
-MixinConfigs: voxelregion-forge.mixins.json,voxelregion-receipts.mixins.json,vre-starlight.mixins.json
+MixinConfigs: voxelregion-forge.mixins.json,voxelregion-receipts.mixins.json
 ```
 
-前两个配置及 `voxelregion-forge.refmap.json` 位于 adapter jar 内；第三个配置和 `vre-starlight.refmap.json` 位于独立光照组件内。宿主还须合并该组件的 `META-INF/accesstransformer.cfg`，并在开发环境应用同一组 AT。仓库的 `tools/gradle/starlight-packaging.gradle` 实现了编译、独立映射、JarJar 和检查任务；手动接入时不能仅复制 adapter 和 engine。
+两个配置及 `voxelregion-forge.refmap.json` 位于 adapter jar 内。此前第三方光照组件的构建脚本、额外 Mixin 配置、refmap、AT 与嵌套库已经移除；宿主升级时也必须删除这些旧接线，不得从旧 build 目录补回。
 
-全局光照默认在客户端和服务端启动阶段接管，包含普通世界运行；不依赖先提交区域任务。它不能与另一份 Starlight 或其他替换同一光照实现的模组同时加载。范围、开关和验证边界见 [全局光照说明](global-lighting.md)。`install` 注册 Forge 事件和配置，不能在世界启动后补装 mixin。提交操作前会检查原生保存、光照和区块变更 hook；缺少 hook 时拒绝接受任务。
+独立光照实现已在绑定构建哈希的整合包中验证普通更新、保存重载、GuideME 与指定光影/PBR 路径；吞吐目标仍有未达标样本。后续源码候选不能直接继承较早构建的结论，具体构建与范围见 [全局光照说明](global-lighting.md)。`install` 注册 Forge 事件和配置，不能在世界启动后补装 mixin。提交操作前会检查原生保存、光照和区块变更 hook；缺少 hook 时拒绝接受任务。
 
 在宿主的 `@Mod` 构造阶段调用：
 
@@ -74,7 +73,7 @@ var handle = ForgeRegionEngine.submit(level, actorUuid, restored,
 
 控制动作有 `PAUSE`、`RESUME`、`CANCEL`。`ControlResult.applied` 表示本次动作是否被接受，`reason` 给出拒绝原因，`status` 在任务存在时包含动作后的快照。取消保留已经完成的世界写入。`PAUSED_RECOVERY` 不能通过普通 resume 强制回放；没有可靠证据的旧操作必须保持暂停或取消。
 
-`WRITTEN` 表示所有选中阶段完成，原生光照、地形/POI 保存和所需网络队列已确认。`SETTLING` 仍在等待这些确认。`completedChunkPhases` 保留兼容的区块阶段计数：新整区块任务每个区块只有一个阶段；旧球壳任务中同一区块可能贡献多个阶段。
+`WRITTEN` 表示所有选中阶段完成，光照发布、地形/POI 保存和所需网络队列已确认。`SETTLING` 仍在等待这些确认。`completedChunkPhases` 保留兼容的区块阶段计数：新整区块任务每个区块只有一个阶段；旧球壳任务中同一区块可能贡献多个阶段。
 
 `Status.progress()` 分别报告准备阶段，以及正在写入、加载、等待光照、存盘和发包的区块数。取消或失败的任务仍可能有此前提交的工作等待收尾，应检查这些计数；不能把接受取消等同于已经回滚或全部排空。
 

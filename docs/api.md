@@ -157,7 +157,7 @@ FrozenOcclusion refined = FrozenOcclusion.raycastRefined(center, volume.bounds()
 
 输入会复制为不可变数据。`new Session(snapshot, maxWorkingBytes)` 后调用 `step(maxWork)` 可分段求解；完成后用 `result()` 读取亮度或每段的 packed nibble 数组。`solve(snapshot)` 是一次完成的便捷接口，纯计算可在宿主允许的工作线程运行。对均匀全空气结果无需分配每格光照数组。
 
-这是固定边界问题的求解器，不证明外部世界已收敛。宿主必须复查地形和边界版本，通过合法原生接口安装结果，再处理外边界传播。Forge 的 `ClearedChunkLightBatch.STRATEGY` 实现该接入，不能单独将求解结果当作保存/网络发布许可。流体、透明形状、保留发光源等不满足证明域的内容使用原生光照。
+这是固定边界问题的求解器，不证明外部世界已收敛。宿主必须复查地形和边界版本，通过合法接口安装结果，再处理外边界传播，不能单独将求解结果当作保存/网络发布许可。Forge 默认由 [全局光照实现](global-lighting.md) 处理普通更新及区域重建；流体、透明形状和保留光源走自有通用求解。关闭全局实现后，`ClearedChunkLightBatch.STRATEGY` 保留旧的固定边界接入及原生回退。
 
 ## Column nearest search
 

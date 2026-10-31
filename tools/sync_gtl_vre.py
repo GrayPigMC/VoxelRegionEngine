@@ -36,13 +36,6 @@ def main() -> None:
     for module in ("vre-engine", "vre-forge"):
         for name in ("LICENSE", "NOTICE"):
             files[f"{module}/{name}"] = source / name
-    # Preserve the independent LGPL component, including its complete source and
-    # provenance. It is never relabelled as part of the MPL portable library.
-    lighting = source / "third_party/starlight-forge"
-    for path in sorted(lighting.rglob("*")):
-        if path.is_file():
-            files[f"vre-starlight/{path.relative_to(lighting).as_posix()}"] = path
-    files["gradle/vre-starlight-packaging.gradle"] = source / "tools/gradle/starlight-packaging.gradle"
 
     digest = hashlib.sha256()
     hashes: dict[str, str] = {}
@@ -61,10 +54,22 @@ def main() -> None:
         manifest_path = target / "vre-vendor.json"
         if manifest_path.is_file():
             old = json.loads(manifest_path.read_text(encoding="utf-8"))
+            obsolete_files = []
             for name in set(old.get("files", {})) - set(files):
+                relative = Path(name)
+                if relative.is_absolute() or ".." in relative.parts or relative.as_posix() != name:
+                    raise SystemExit(f"Refusing malformed stale manifest path: {name}")
                 obsolete = (target / name).resolve()
-                if not obsolete.is_relative_to(target) or not name.startswith(("vre-engine/", "vre-forge/", "vre-starlight/")):
+                # The removed component's old manifest also owns this one build
+                # script. Accept its exact path, never arbitrary gradle/ entries.
+                managed = name.startswith(("vre-engine/", "vre-forge/", "vre-starlight/"))
+                managed |= name == "gradle/vre-starlight-packaging.gradle"
+                if not obsolete.is_relative_to(target) or not managed:
                     raise SystemExit(f"Refusing stale manifest path outside the managed VRE modules: {name}")
+                obsolete_files.append(obsolete)
+            # Validate every old path before removing any file or writing the new
+            # snapshot; malformed manifests cannot leave a half-applied update.
+            for obsolete in obsolete_files:
                 if obsolete.is_file():
                     obsolete.unlink()
         for name, data in snapshot.items():

@@ -44,7 +44,7 @@ var status = GtlRegionExplosions.status(level, handle.id()).orElseThrow();
 
 完成数来自已经确认光照、terrain/POI 持久化和必要发包的区块，不是排队数量或刚写入内存的数量。吞吐只计算实际完成数的增长；区块/t 使用真实经过的服务端 tick，区块/s 使用墙钟时间，不能在服务端变慢时固定按 20 TPS 换算。近期窗口用于观察当前速度，起始样本不足或单个 tick 很长时窗口可能短于或长于 5 秒。计时从本次提交开始，包含接受、等待、暂停和收尾时间；最后一条摘要给出整次观察的平均吞吐。
 
-保护拒绝和禁用生成时排除的区块另外显示为“跳过”。进度条及百分比表示已完成加已跳过的处理进度，完成数本身不含跳过；摘要有跳过时会明确说明该范围未清理。即使所有区块均已处理，收尾尚未确认时也不会显示完全完成。任务最终 `WRITTEN` 表示所需原生光照及真实存盘屏障已经确认，必要网络包也已提交；它不代表远端客户端已经接收或渲染。完成、取消或失败均等待此前提交的工作收尾后移除进度条，并发一次结果摘要；取消不回滚已经清理的地形。
+保护拒绝和禁用生成时排除的区块另外显示为“跳过”。进度条及百分比表示已完成加已跳过的处理进度，完成数本身不含跳过；摘要有跳过时会明确说明该范围未清理。即使所有区块均已处理，收尾尚未确认时也不会显示完全完成。任务最终 `WRITTEN` 表示所需光照发布及真实存盘屏障已经确认，必要网络包也已提交；它不代表远端客户端已经接收或渲染。完成、取消或失败均等待此前提交的工作收尾后移除进度条，并发一次结果摘要；取消不回滚已经清理的地形。
 
 同一玩家再次提交时，仅最新任务保留进度条，旧任务继续运行并在结束时单独汇总。玩家断线会移除其进度显示和观察记录，不取消任务；重连后可用 `/gtlregion status` 查询。停服清理显示与统计线程，任务恢复仍由引擎负责。控制台只收到接受和终态反馈，不持续刷屏；无论是否显示进度，操作调度与预算不变。
 
@@ -72,19 +72,19 @@ GTCEu `1.4.4` 的准确 `OreBlock` 类、非沙质矿石注册了静态删除证
 
 ## 自包含构建与快照
 
-GTLCore 保存 `vre-engine` 的便携源码、`vre-forge` 的 Forge 源码，以及 `vre-starlight` 的独立 LGPL 全局光照源码。构建不依赖旁边存在 VoxelRegionEngine 工作树，也不下载临时测试模组作为前提。维护者在库源码稳定后同步：
+GTLCore 保存 `vre-engine` 的便携源码和 `vre-forge` 的 Forge 源码。此前直接导入的第三方光照源码与独立库已移除。构建不依赖旁边存在 VoxelRegionEngine 工作树，也不下载临时测试模组作为前提。维护者在库源码稳定后同步：
 
 ```text
 python tools/sync_gtl_vre.py --core <authorized-GTLCore-checkout> --apply
 ```
 
-不加 `--apply` 只显示待同步快照。`vre-vendor.json` 记录源 revision、dirty 标记、整体 SHA-256 和每个文件的内容哈希；同步工具管理三份源模块和 `gradle/vre-starlight-packaging.gradle`，保留宿主 API 与其他构建桥接。
+不加 `--apply` 只显示待同步快照。`vre-vendor.json` 记录源 revision、dirty 标记、整体 SHA-256 和每个文件的内容哈希；同步工具管理两份源模块，并根据旧清单逐文件删除已移除的光照组件和专用构建脚本，保留宿主 API 与其他构建桥接。所有旧路径会先校验，再执行删除，不能借清单删除其他宿主文件。
 
-宿主一次编译 adapter 和光照组件，再分别 remap 为 SRG Jar-in-Jar 库。adapter 使用独立 `voxelregion-forge.refmap.json`，光照组件使用 `vre-starlight.refmap.json`，均从宿主编译结果按包提取。外层 GTLCore 保留宿主代码、策略资源和全局光照 AT，避免重复打包 `org.voxelregion` 或 `ca.spottedleaf.starlight` 类。两份 VRE 库保留 MPL-2.0 许可证；独立光照库保留 LGPL-3.0、NOTICE、UPSTREAM 来源与修改后对应源码。
+宿主编译 adapter，再 remap 为 SRG Jar-in-Jar 库。adapter 使用独立 `voxelregion-forge.refmap.json`，从宿主编译结果按包提取。外层 GTLCore 保留宿主代码和策略资源，避免重复打包 `org.voxelregion` 类。两份 VRE 库保留 MPL-2.0 许可证。新的独立光照计算位于 adapter 内，不另建第三方库或沿用旧 AT。
 
 GTLCore 的正式 JAR 输出到 `build/libs/`；用于内嵌的 adapter 和其开发映射中间产物输出到 `build/intermediates/vre/`。安装时只需要正式 GTLCore JAR，不应再额外安装这些中间产物。旧构建遗留在 `build/libs/` 的辅助 JAR 不会随目录配置变化自动消失，重新打包时应区分旧文件或先执行 `clean`。
 
-在 GTLCore 工作树运行 `build` 会执行 `verifyPackagedVre` 及其 `verifyPackagedVreStarlight` 依赖，检查 adapter API、三份 mixin 配置、独立 refmap、三份内嵌库、AT、许可证与测试内容隔离。全局组件默认覆盖普通世界运行，详见 [全局光照说明](global-lighting.md)。临时验证源只在 `-PvreVerification` 下启用：
+在 GTLCore 工作树运行 `build` 会执行 `verifyPackagedVre`，检查 adapter API、两份 mixin 配置、独立 refmap、两份内嵌库与测试内容隔离，并拒绝旧光照类、资源、AT 和独立制品残留。首次迁移应先执行 `clean`。替代实现仍需绑定新构建重新验证，旧 release44 结论不沿用；详见 [全局光照说明](global-lighting.md)。临时验证源只在 `-PvreVerification` 下启用：
 
 ```text
 gradlew.bat runVreGameTest -PvreVerification -PvreVerificationRunDirectory=<isolated-run-directory> -PvreVerificationRuntimeDir=<local-verification-jars> --max-workers=1

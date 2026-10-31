@@ -22,7 +22,9 @@
 
 整区块执行先完成 Palette 替换和剩余原生删除，再用最终区块尝试 `ClearedChunkLightBatch.afterWholeChunkMutation`。旧计划的原生余项数量不能代表最终还留有什么。提前退出或原生回调抛错时，延迟光照依赖必须转入真实原生修复；不能遗留永不完成的保存 future。
 
-快速光照当前证明整个世界高度内只剩空气或不发光、不透光的状态。捕获实际边界之前先等待周围九个区块的原生旧光照工作；等待期间修改使证明失效时，最多重新获取一次区块身份与修订号，再等待新的屏障。开始捕获后不能靠重置修订号接受旧快照。水、发光残留、邻块未加载或再次失效仍走原生路径。有限枚举的 `fallbackReasonCounts()` 和 `preCaptureRefreshes()` 用于区分适用性、容量和修订失效，不能用安装算法存在来推断生产命中率。
+默认开启的 [全局光照实现](global-lighting.md) 使用自有完整高度求解和批量发布，复杂材质也由自有通用路径处理。下述固定边界策略及原生传播回退仅用于关闭全局实现的对照路径，不能用其命中计数代表默认路径性能。
+
+固定边界快速光照证明整个世界高度内只剩空气或不发光、不透光的状态。捕获实际边界之前先等待周围九个区块的原生旧光照工作；等待期间修改使证明失效时，最多重新获取一次区块身份与修订号，再等待新的屏障。开始捕获后不能靠重置修订号接受旧快照。水、发光残留、邻块未加载或再次失效仍走原生路径。有限枚举的 `fallbackReasonCounts()` 和 `preCaptureRefreshes()` 用于区分适用性、容量和修订失效，不能用安装算法存在来推断生产命中率。
 
 四个侧面的光照捕获按邻区块、区段读取原生 **visible** 光层，每层复制一次后直接读取局部 nibble；不使用会优先返回 queued、尚未发布数据的 `getDataLayerData`。BLOCK 可见层确实不存在时按原生规则取零；SKY 缺层仍调用原生 `getBrightness`，因为它可能继承更高层底面的阴影，也可能返回直射天光。没有可见层读取接口、接口明确不支持或发生链接不兼容时，同样回到原生查询，不把“无法读取”当成“确定没有光”。邻区块和区段状态也被复用，但跨边界的形状遮挡仍调用原生判定。此读取缓存不改变九区块屏障、修订校验或最终原生边界收尾。
 
@@ -119,7 +121,7 @@ VRE 的普通 DEFLATE 数据经非逐写同步的通道写入。一个批次先�
 
 客户端的 `LevelChunk` 变更不再分发服务端修订号监听器。对 `clearFluids=true`、无物理更新、无遮挡传播的活动整区块操作，已经清理的格暂时拒绝邻区块流体流回；任务结束即释放该限制，普通流体行为恢复。
 
-实现参考了 [Lucis 的区域计算和发布分工](https://github.com/Team-Argentum/Lucis/blob/master/src/main/java/dev/denismasterherobrine/lucis/light/runtime/LucisRuntimeManager.java)以及 [ScalableLux 对相邻区块调度的锁范围](https://github.com/RelativityMC/ScalableLux/blob/ver/26.2.0/src/main/java/ca/spottedleaf/starlight/common/thread/SchedulingUtil.java)。多线程不意味着可以无约束地同时改写相邻区块。本库上述专用内核为独立实现，没有内嵌这两个项目的实现，也没有宣称替换游戏全部光照引擎。
+实现参考了 [Lucis 的区域计算和发布分工](https://github.com/Team-Argentum/Lucis/blob/master/src/main/java/dev/denismasterherobrine/lucis/light/runtime/LucisRuntimeManager.java)以及 [ScalableLux 对相邻区块调度的锁范围](https://github.com/RelativityMC/ScalableLux/blob/ver/26.2.0/src/main/java/ca/spottedleaf/starlight/common/thread/SchedulingUtil.java)。多线程不意味着可以无约束地同时改写相邻区块。本页上述专用内核为独立的区域算法，没有内嵌这两个项目的实现；普通世界的独立全局光照实现另见 [全局光照说明](global-lighting.md)，其验证和性能结果不能与区域专用路径混用。
 
 预读不仅申请 `FULL`，也提前推进具有待执行列表的原生生成后处理。准备窗口按反馈限制每帧申请和提升数量，正常从每帧 32 次后处理提升额度开始，随实际准备吞吐调整、最高 128 次，预算紧张时进一步下降；确认真实 `BLOCK_TICKING` future 后降回加载票据，执行游标接管时转移当前票据等级。暂停、取消和结束按实际等级释放，不在世界线程等待 future，也不绕开原生升级或保留方块的后处理。仅预先加载到 `FULL` 的吞吐测试不足以覆盖这个阶段。
 

@@ -11,9 +11,9 @@ from zipfile import ZipFile
 
 ENGINE_ID = ('org.voxelregion', 'voxel-region-engine')
 ADAPTER_ID = ('org.voxelregion', 'voxel-region-forge-adapter-1.20.1')
-LIGHTING_ID = ('ca.spottedleaf.starlight', 'vre-starlight-forge-1.20.1')
-LIGHTING_CONFIG = 'vre-starlight.mixins.json'
 ACCESS_TRANSFORMERS = 'META-INF/accesstransformer.cfg'
+REMOVED_MARKERS = (b'ca/spottedleaf/', b'ca.spottedleaf.', b'vre-starlight',
+                   b'META-INF/starlight/')
 
 
 def require(condition, message):
@@ -28,58 +28,48 @@ def manifest(archive):
     return dict(line.split(': ', 1) for line in text.splitlines() if ': ' in line)
 
 
-def access_transformers(archive):
-    return {' '.join(line.split('#', 1)[0].split())
-            for line in archive.read(ACCESS_TRANSFORMERS).decode('utf8').splitlines()
-            if line.split('#', 1)[0].strip()}
+def removed_component(archive, label):
+    """Inspect content too: old classes can survive in refmaps or nested jars."""
+    for name in archive.namelist():
+        encoded = name.encode('utf8')
+        require(not any(marker in encoded for marker in REMOVED_MARKERS),
+                'Removed lighting component entry: ' + label + '!' + name)
+        if name.endswith('/'):
+            continue
+        data = archive.read(name)
+        require(not any(marker in data for marker in REMOVED_MARKERS),
+                'Removed lighting reference: ' + label + '!' + name)
+        if name.endswith('.jar'):
+            with ZipFile(io.BytesIO(data)) as nested:
+                removed_component(nested, label + '!' + name)
+    # This standalone project has no source AT. A resource left by the removed
+    # component must not be silently repackaged by an incremental build.
+    require(ACCESS_TRANSFORMERS not in archive.namelist(),
+            'Unexpected access transformer in standalone artifact: ' + label)
 
 
-def lighting(archive, parent):
-    names = set(archive.namelist())
-    required = {'ca/spottedleaf/starlight/common/light/StarLightEngine.class',
-                'ca/spottedleaf/starlight/common/light/StarLightInterface.class',
-                'ca/spottedleaf/starlight/common/light/SWMRNibbleArray.class',
-                LIGHTING_CONFIG, ACCESS_TRANSFORMERS,
-                'META-INF/starlight/LICENSE', 'META-INF/starlight/NOTICE',
-                'META-INF/starlight/UPSTREAM.json'}
-    require(required <= names, 'Missing global lighting entries: ' + str(sorted(required - names)))
-    require('META-INF/mods.toml' not in names, 'Lighting component must not register another gameplay mod')
-    for name in names:
-        if name.endswith('.class'):
-            require(name.startswith('ca/spottedleaf/starlight/'), 'Foreign class in LGPL component: ' + name)
-    attributes = manifest(archive)
-    require(attributes.get('FMLModType') == 'GAMELIBRARY', 'Lighting library discovery metadata missing')
-    require(attributes.get('Automatic-Module-Name') == 'ca.spottedleaf.starlight', 'Wrong lighting module name')
-    require(LIGHTING_CONFIG in attributes.get('MixinConfigs', '').split(','), 'Lighting Mixin manifest entry missing')
-    spec = json.loads(archive.read(LIGHTING_CONFIG))
-    require(spec['package'] == 'ca.spottedleaf.starlight.mixin', 'Wrong lighting Mixin package')
-    require(spec.get('required') is True, 'Global lighting mixins must be required')
-    require(spec.get('refmap') in names, 'Lighting production refmap is missing')
-    for mixin in spec.get('mixins', []) + spec.get('client', []) + spec.get('server', []):
-        require((spec['package'] + '.' + mixin).replace('.', '/') + '.class' in names,
-                'Missing lighting mixin class: ' + mixin)
-    require(spec.get('plugin', '').replace('.', '/') + '.class' in names, 'Lighting Mixin plugin is missing')
-    refmap = json.loads(archive.read(spec['refmap']))
-    mappings = refmap.get('mappings', {})
-    require(bool(mappings), 'Lighting production refmap has no mappings')
-    for namespace, entries in [('mappings', mappings)] + list(refmap.get('data', {}).items()):
-        require(all(key.startswith('ca/spottedleaf/starlight/') for key in entries),
-                'Foreign mixin mappings in lighting refmap: ' + namespace)
-    required_at = access_transformers(archive)
-    require(bool(required_at), 'Lighting access transformer is empty')
-    require(ACCESS_TRANSFORMERS in parent.namelist(), 'Host must expose lighting access transformers')
-    require(required_at <= access_transformers(parent), 'Host access transformers omit lighting rules')
-    require(b'GNU LESSER GENERAL PUBLIC LICENSE' in archive.read('META-INF/starlight/LICENSE'),
-            'Lighting component is missing its LGPL license text')
-    require(bool(archive.read('META-INF/starlight/NOTICE').strip()), 'Lighting NOTICE is empty')
-    provenance = json.loads(archive.read('META-INF/starlight/UPSTREAM.json'))
-    require(provenance.get('license') == 'LGPL-3.0-only', 'Wrong lighting provenance license')
-    require(provenance.get('repository') == 'https://github.com/PaperMC/Starlight', 'Missing Starlight provenance')
-    commit = provenance.get('commit', '')
-    require(len(commit) == 40 and all(c in '0123456789abcdef' for c in commit), 'Missing pinned upstream commit')
+def build_cache(root):
+    """Fail on stale build output; never delete user files from a verifier."""
+    if not root.exists():
+        return
+    for path in root.rglob('*'):
+        relative = path.relative_to(root).as_posix()
+        require(not any(marker in relative.encode('utf8') for marker in REMOVED_MARKERS),
+                'Removed lighting build output; run clean: ' + str(path))
+        if not path.is_file():
+            continue
+        if path.suffix == '.jar':
+            with ZipFile(path) as archive:
+                removed_component(archive, str(path))
+        elif path.suffix in ('.class', '.json', '.cfg', '.MF'):
+            require(not any(marker in path.read_bytes() for marker in REMOVED_MARKERS),
+                    'Removed lighting reference in build output; run clean: ' + str(path))
+        require(not relative.endswith(ACCESS_TRANSFORMERS),
+                'Stale standalone access transformer; run clean: ' + str(path))
 
 
 def engine(archive):
+    removed_component(archive, 'portable engine')
     names = archive.namelist()
     require('org/voxelregion/geometry/Volume.class' in names, 'Missing engine geometry')
     require('org/voxelregion/planner/SectionPlanner.class' in names, 'Missing engine planner')
@@ -101,29 +91,35 @@ def main():
     parser.add_argument('--core', required=True, type=Path)
     parser.add_argument('--forge', required=True, type=Path)
     parser.add_argument('--adapter', type=Path)
-    parser.add_argument('--starlight', type=Path, help='Optional standalone remapped LGPL component to compare')
+    parser.add_argument('--build-root', action='append', type=Path, default=[],
+                        help='Additional standalone build output to check for stale removed-component files')
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
+    repository = Path(__file__).resolve().parents[1]
+    for root in [repository / 'build', repository / 'tools/forge-test/build', *args.build_root]:
+        build_cache(root)
     with ZipFile(args.core) as archive:
         engine(archive)
         core_classes = {name: archive.read(name) for name in archive.namelist() if name.endswith('.class')}
     with ExitStack() as stack:
         archive = stack.enter_context(ZipFile(args.forge))
+        removed_component(archive, str(args.forge))
         names = archive.namelist()
         require('org/voxelregion/testmod/RegionChargeItem.class' in names, 'Missing adjustable charge')
         require(not any('/geometry/' in n for n in names), 'Engine duplicated outside nested jar')
         metadata = json.loads(archive.read('META-INF/jarjar/metadata.json'))
         libraries = metadata['jars']
         identities = [(entry['identifier']['group'], entry['identifier']['artifact']) for entry in libraries]
-        require(len(libraries) == 3 and set(identities) == {ENGINE_ID, ADAPTER_ID, LIGHTING_ID},
+        require(len(libraries) == 2 and set(identities) == {ENGINE_ID, ADAPTER_ID},
                 'JarJar identities must match the GTLCore embedding, not Gradle subproject aliases')
         paths = [entry['path'] for entry in libraries]
         require(len(paths) == len(set(paths)), 'Multiple JarJar entries point to the same archive')
         require(all(path.startswith(('META-INF/jarjar/', 'META-INF/jars/')) and path in names for path in paths),
                 'Missing or misplaced nested JarJar archive')
-        require(LIGHTING_CONFIG in manifest(archive).get('MixinConfigs', '').split(','),
-                'Test mod manifest does not activate global lighting mixins')
-        found_engine = found_adapter = found_lighting = 0
+        required_configs = {'voxelregion-forge.mixins.json', 'voxelregion-receipts.mixins.json'}
+        require(required_configs <= set(manifest(archive).get('MixinConfigs', '').split(',')),
+                'Test mod manifest does not activate the adapter mixins')
+        found_engine = found_adapter = 0
         classes = set()
         archives = [(args.forge.name, archive, None)]
         for entry in libraries:
@@ -161,19 +157,12 @@ def main():
                     require(spec['refmap'] in part_names, 'Missing production refmap: ' + config)
                 if args.adapter:
                     with ZipFile(args.adapter) as standalone:
+                        removed_component(standalone, str(args.adapter))
                         require({n: part.read(n) for n in this_classes} ==
                                 {n: standalone.read(n) for n in standalone.namelist() if n.endswith('.class')},
                                 'Nested adapter differs from standalone remapped adapter')
-            if identity == LIGHTING_ID:
-                found_lighting += 1
-                lighting(part, archive)
-                if args.starlight:
-                    require(archive.read(label) == args.starlight.read_bytes(),
-                            'Nested lighting component differs from standalone remapped component')
-            elif any(name.startswith('ca/spottedleaf/starlight/') for name in this_classes):
-                raise ValueError('Lighting classes escaped the separate LGPL component: ' + label)
-        require(found_engine == found_adapter == found_lighting == 1, 'Missing or duplicated nested library')
-    artifacts = [p for p in (args.core, args.forge, args.adapter, args.starlight) if p]
+        require(found_engine == found_adapter == 1, 'Missing or duplicated nested library')
+    artifacts = [p for p in (args.core, args.forge, args.adapter) if p]
     result = {'result': 'PASS', 'core': str(args.core.resolve()), 'forge': str(args.forge.resolve()),
               'sha256': {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in artifacts},
               'nested_libraries': libraries}
