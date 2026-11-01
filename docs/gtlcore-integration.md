@@ -84,7 +84,7 @@ python tools/sync_gtl_vre.py --core <authorized-GTLCore-checkout> --apply
 
 GTLCore 的正式 JAR 输出到 `build/libs/`；用于内嵌的 adapter 和其开发映射中间产物输出到 `build/intermediates/vre/`。安装时只需要正式 GTLCore JAR，不应再额外安装这些中间产物。旧构建遗留在 `build/libs/` 的辅助 JAR 不会随目录配置变化自动消失，重新打包时应区分旧文件或先执行 `clean`。
 
-在 GTLCore 工作树运行 `build` 会执行 `verifyPackagedVre`，检查 adapter API、两份 mixin 配置、独立 refmap、两份内嵌库与测试内容隔离，并拒绝旧光照类、资源、AT 和独立制品残留。首次迁移应先执行 `clean`。替代实现仍需绑定新构建重新验证，旧 release44 结论不沿用；详见 [全局光照说明](global-lighting.md)。临时验证源只在 `-PvreVerification` 下启用：
+在 GTLCore 工作树运行 `build` 会执行 `verifyPackagedVre`，检查 adapter API、两份 mixin 配置、独立 refmap、两份内嵌库与测试内容隔离，并拒绝旧光照类、资源、AT 和独立制品残留。首次迁移应先执行 `clean`。当前适配器只加速区域任务，不接管全局光照；构建还拒绝全局 Provider、Mixin 与选择器残留，详见 [区域光照说明](region-lighting.md)。临时验证源只在 `-PvreVerification` 下启用：
 
 ```text
 gradlew.bat runVreGameTest -PvreVerification -PvreVerificationRunDirectory=<isolated-run-directory> -PvreVerificationRuntimeDir=<local-verification-jars> --max-workers=1

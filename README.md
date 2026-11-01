@@ -1,6 +1,6 @@
 # VoxelRegionEngine
 
-已移除此前直接导入的第三方光照实现，当前交付为 MPL-2.0 的 engine 与 adapter 两份库。自有全局光照已通过绑定构建哈希的整合包兼容性检查；性能仍有未达标样本，后续候选单独验收。具体构建与验证范围见 [全局光照说明](docs/global-lighting.md)。
+当前交付为 MPL-2.0 的 engine 与 adapter 两份库。已移除全局光照接管；普通世界光照由原生引擎处理，VRE 仅加速爆炸等区域清理任务的光照。旧启动参数不能重新开启全局接管。适用范围与存档兼容说明见 [区域光照说明](docs/region-lighting.md)。
 
 Java 17 的体素区域操作库，采用 MPL-2.0。面向大范围爆炸、开挖和区域清除；算法核心不依赖 Minecraft、Forge、FTB 或 GTLCore。当前版本为 0.1.0，接口处于初始开发期。
 

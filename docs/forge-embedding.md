@@ -20,7 +20,7 @@ MixinConfigs: voxelregion-forge.mixins.json,voxelregion-receipts.mixins.json
 
 两个配置及 `voxelregion-forge.refmap.json` 位于 adapter jar 内。此前第三方光照组件的构建脚本、额外 Mixin 配置、refmap、AT 与嵌套库已经移除；宿主升级时也必须删除这些旧接线，不得从旧 build 目录补回。
 
-独立光照实现已在绑定构建哈希的整合包中验证普通更新、保存重载、GuideME 与指定光影/PBR 路径；吞吐目标仍有未达标样本。后续源码候选不能直接继承较早构建的结论，具体构建与范围见 [全局光照说明](global-lighting.md)。`install` 注册 Forge 事件和配置，不能在世界启动后补装 mixin。提交操作前会检查原生保存、光照和区块变更 hook；缺少 hook 时拒绝接受任务。
+适配器已移除全局光照接管，只保留区域任务加速；普通更新、区块生成和重载使用原生引擎。旧全局构建的验证不作为当前性能结论，范围和存档兼容见 [区域光照说明](region-lighting.md)。`install` 注册 Forge 事件和配置，不能在世界启动后补装 mixin。提交操作前会检查原生保存、光照和区块变更 hook；缺少 hook 时拒绝接受任务。
 
 在宿主的 `@Mod` 构造阶段调用：
 

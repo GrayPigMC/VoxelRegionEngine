@@ -116,3 +116,30 @@ tasks.named('remapJar', net.fabricmc.loom.task.RemapJarTask) {
     nestedJars.from(remappedAdapter.flatMap { it.archiveFile })
 }
 tasks.named('assemble') { dependsOn remappedAdapter }
+
+// Inspect the actual library, including incremental-build leftovers. Ordinary
+// chunk lighting must never regain the removed provider through stale output.
+def verifyRegionLighting = tasks.register('verifyRegionLighting') {
+    group = 'verification'
+    dependsOn remappedAdapter
+    inputs.file(remappedAdapter.flatMap { it.archiveFile })
+    doLast {
+        def removed = ['WorldLightProvider', 'WorldLightEngineMixin', 'WorldLightFenceMixin', 'LightingMixinPlugin']
+        new java.util.zip.ZipFile(remappedAdapter.get().archiveFile.get().asFile).withCloseable { zip ->
+            zip.entries().each { entry ->
+                if (entry.directory) return
+                def content = zip.getInputStream(entry).withCloseable {
+                    new String(it.readAllBytes(), java.nio.charset.StandardCharsets.ISO_8859_1)
+                }
+                if (removed.any { entry.name.contains(it) || content.contains(it) })
+                    throw new GradleException("Removed global-light hook remains in ${entry.name}; run clean")
+            }
+            def config = zip.getInputStream(zip.getEntry('voxelregion-forge.mixins.json')).withCloseable {
+                new groovy.json.JsonSlurper().parse(it, 'UTF-8')
+            }
+            if (config.plugin || !config.mixins.contains('LightFenceMixin'))
+                throw new GradleException('VRE must use the region light fence without a global-light selector')
+        }
+    }
+}
+tasks.named('build') { dependsOn verifyRegionLighting }

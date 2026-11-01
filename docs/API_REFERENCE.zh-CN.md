@@ -47,7 +47,7 @@ MixinConfigs: voxelregion-forge.mixins.json,voxelregion-receipts.mixins.json
 
 两个配置与 `voxelregion-forge.refmap.json` 在 adapter 内。此前第三方光照的专用 Gradle 脚本、额外 Mixin/refmap 和 AT 已移除，宿主不应继续加载旧组件或复用其缓存产物。
 
-独立光照实现已有绑定构建哈希的实际整合包验证；性能仍有未达标样本。具体兼容性范围和后续候选状态见 [全局光照说明](global-lighting.md)，不能沿用被移除组件的结论。在宿主 `@Mod` 构造阶段安装区域运行时：
+适配器仅加速区域清理光照，普通世界使用原生引擎；已移除全局接管及其启动开关。范围和存档兼容见 [区域光照说明](region-lighting.md)。在宿主 `@Mod` 构造阶段安装区域运行时：
 
 ```java
 import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
@@ -285,7 +285,7 @@ var keepPlayers = new ForgeEntityOperations.Options(false,
 
 未生成区块只有满足完整覆盖、保护层、生成环境及所用快捷路径的证明条件才可直接生成清空结果；其他情况仍走原生读取/生成后清除。`generateMissingChunks=true` 不保证每个区块都跳过世界生成，调大线程数也不会消除原生依赖链。
 
-非 `NONE` 传播先捕获并冻结原始阻挡，缺数据、捕获期间修改或恢复证据无效时暂停。不能将未知未加载区块当成透明空气。开启物理的模式可能产生选区外的间接变化。光照快捷路径也有适用条件；默认全局接管时，流体、透明形状或保留光源等情况使用自有通用光照路径。仅以 `-Dvre.globalLighting=false` 重启的对照配置保留既有区域光照与原生回退路径。
+非 `NONE` 传播先捕获并冻结原始阻挡，缺数据、捕获期间修改或恢复证据无效时暂停。不能将未知未加载区块当成透明空气。开启物理的模式可能产生选区外的间接变化。光照快捷路径也有适用条件；区域快照及边界证明不足、流体或特殊形状等不能安全加速时走原生回退。普通世界的生成、加载与光照更新始终使用原生引擎。
 
 预算是协作式的：一个原生回调或整区块提交不能在执行中途强行抢占。不承诺固定区块/tick；读取、生成、保护、实时世界写入、光照、保存和客户端网络都可能影响吞吐。`ServerTickTimings.lastNanos()`、`averageMillis()`、`sampleCount()` 可观察完整服务器 tick，调用 Forge END 时最新完成样本属于上一 tick。
 

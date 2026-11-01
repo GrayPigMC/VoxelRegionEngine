@@ -22,7 +22,7 @@
 
 整区块执行先完成 Palette 替换和剩余原生删除，再用最终区块尝试 `ClearedChunkLightBatch.afterWholeChunkMutation`。旧计划的原生余项数量不能代表最终还留有什么。提前退出或原生回调抛错时，延迟光照依赖必须转入真实原生修复；不能遗留永不完成的保存 future。
 
-默认开启的 [全局光照实现](global-lighting.md) 使用自有完整高度求解和批量发布，复杂材质也由自有通用路径处理。下述固定边界策略及原生传播回退仅用于关闭全局实现的对照路径，不能用其命中计数代表默认路径性能。
+当前仅保留 [区域光照加速](region-lighting.md)，普通世界使用原生引擎。以下固定边界策略、区域批量发布及原生传播回退是区域清理的实际路径。
 
 固定边界快速光照证明整个世界高度内只剩空气或不发光、不透光的状态。捕获实际边界之前先等待周围九个区块的原生旧光照工作；等待期间修改使证明失效时，最多重新获取一次区块身份与修订号，再等待新的屏障。开始捕获后不能靠重置修订号接受旧快照。水、发光残留、邻块未加载或再次失效仍走原生路径。有限枚举的 `fallbackReasonCounts()` 和 `preCaptureRefreshes()` 用于区分适用性、容量和修订失效，不能用安装算法存在来推断生产命中率。
 
@@ -121,7 +121,7 @@ VRE 的普通 DEFLATE 数据经非逐写同步的通道写入。一个批次先�
 
 客户端的 `LevelChunk` 变更不再分发服务端修订号监听器。对 `clearFluids=true`、无物理更新、无遮挡传播的活动整区块操作，已经清理的格暂时拒绝邻区块流体流回；任务结束即释放该限制，普通流体行为恢复。
 
-实现参考了 [Lucis 的区域计算和发布分工](https://github.com/Team-Argentum/Lucis/blob/master/src/main/java/dev/denismasterherobrine/lucis/light/runtime/LucisRuntimeManager.java)以及 [ScalableLux 对相邻区块调度的锁范围](https://github.com/RelativityMC/ScalableLux/blob/ver/26.2.0/src/main/java/ca/spottedleaf/starlight/common/thread/SchedulingUtil.java)。多线程不意味着可以无约束地同时改写相邻区块。本页上述专用内核为独立的区域算法，没有内嵌这两个项目的实现；普通世界的独立全局光照实现另见 [全局光照说明](global-lighting.md)，其验证和性能结果不能与区域专用路径混用。
+实现参考了 [Lucis 的区域计算和发布分工](https://github.com/Team-Argentum/Lucis/blob/master/src/main/java/dev/denismasterherobrine/lucis/light/runtime/LucisRuntimeManager.java)以及 [ScalableLux 对相邻区块调度的锁范围](https://github.com/RelativityMC/ScalableLux/blob/ver/26.2.0/src/main/java/ca/spottedleaf/starlight/common/thread/SchedulingUtil.java)。多线程不意味着可以无约束地同时改写相邻区块。本页上述专用内核为独立的区域算法，没有内嵌这两个项目的实现；旧全局接管已经移除，其 [历史验证和性能记录](global-lighting.md) 不能与当前区域专用路径混用。
 
 预读不仅申请 `FULL`，也提前推进具有待执行列表的原生生成后处理。准备窗口按反馈限制每帧申请和提升数量，正常从每帧 32 次后处理提升额度开始，随实际准备吞吐调整、最高 128 次，预算紧张时进一步下降；确认真实 `BLOCK_TICKING` future 后降回加载票据，执行游标接管时转移当前票据等级。暂停、取消和结束按实际等级释放，不在世界线程等待 future，也不绕开原生升级或保留方块的后处理。仅预先加载到 `FULL` 的吞吐测试不足以覆盖这个阶段。
 
